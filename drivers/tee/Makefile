@@ -1,3 +1,4 @@
+ccflags-y += -g -O0
 obj-$(CONFIG_TEE) += tee.o
 tee-objs += tee_core.o
 tee-objs += tee_shm.o
