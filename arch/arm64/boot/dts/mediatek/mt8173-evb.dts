@@ -42,6 +42,13 @@
 		gpio = <&pio 130 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
 	};
+
+	firmware {
+		optee {
+			compatible = "linaro,optee-tz";
+			method = "smc";
+		};
+	};
 };
 
 &i2c1 {
