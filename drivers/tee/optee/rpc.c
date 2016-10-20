@@ -156,7 +156,7 @@ bad:
 	arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 }
 
-static void handle_rpc_supp_cmd(struct tee_context *ctx,
+static void handle_rpc_supp_cmd(struct optee *optee,
 				struct optee_msg_arg *arg)
 {
 	struct tee_param *params;
@@ -176,7 +176,8 @@ static void handle_rpc_supp_cmd(struct tee_context *ctx,
 		goto out;
 	}
 
-	arg->ret = optee_supp_thrd_req(ctx, arg->cmd, arg->num_params, params);
+	arg->ret = optee_supp_thrd_req(optee, arg->cmd, arg->num_params,
+				       params);
 
 	if (optee_to_msg_param(msg_params, arg->num_params, params))
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
@@ -184,11 +185,10 @@ out:
 	kfree(params);
 }
 
-static struct tee_shm *cmd_alloc_suppl(struct tee_context *ctx, size_t sz)
+static struct tee_shm *cmd_alloc_suppl(struct optee *optee, size_t sz)
 {
 	u32 ret;
 	struct tee_param param;
-	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct tee_shm *shm;
 
 	param.attr = TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INOUT;
@@ -196,7 +196,8 @@ static struct tee_shm *cmd_alloc_suppl(struct tee_context *ctx, size_t sz)
 	param.u.value.b = sz;
 	param.u.value.c = 0;
 
-	ret = optee_supp_thrd_req(ctx, OPTEE_MSG_RPC_CMD_SHM_ALLOC, 1, &param);
+	ret = optee_supp_thrd_req(optee, OPTEE_MSG_RPC_CMD_SHM_ALLOC, 1,
+				  &param);
 	if (ret)
 		return ERR_PTR(-ENOMEM);
 
@@ -207,7 +208,7 @@ static struct tee_shm *cmd_alloc_suppl(struct tee_context *ctx, size_t sz)
 	return shm;
 }
 
-static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
+static void handle_rpc_func_cmd_shm_alloc(struct tee_device *teedev,
 					  struct optee_msg_arg *arg)
 {
 	struct optee_msg_param *params = OPTEE_MSG_GET_PARAMS(arg);
@@ -234,10 +235,10 @@ static void handle_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
 	sz = params->u.value.b;
 	switch (params->u.value.a) {
 	case OPTEE_MSG_RPC_SHM_TYPE_APPL:
-		shm = cmd_alloc_suppl(ctx, sz);
+		shm = cmd_alloc_suppl(tee_get_drvdata(teedev), sz);
 		break;
 	case OPTEE_MSG_RPC_SHM_TYPE_KERNEL:
-		shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED);
+		shm = tee_shm_priv_alloc(teedev, sz);
 		break;
 	default:
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
@@ -264,7 +265,7 @@ bad:
 	tee_shm_free(shm);
 }
 
-static void cmd_free_suppl(struct tee_context *ctx, struct tee_shm *shm)
+static void cmd_free_suppl(struct optee *optee, struct tee_shm *shm)
 {
 	struct tee_param param;
 
@@ -286,10 +287,10 @@ static void cmd_free_suppl(struct tee_context *ctx, struct tee_shm *shm)
 	 */
 	tee_shm_put(shm);
 
-	optee_supp_thrd_req(ctx, OPTEE_MSG_RPC_CMD_SHM_FREE, 1, &param);
+	optee_supp_thrd_req(optee, OPTEE_MSG_RPC_CMD_SHM_FREE, 1, &param);
 }
 
-static void handle_rpc_func_cmd_shm_free(struct tee_context *ctx,
+static void handle_rpc_func_cmd_shm_free(struct tee_device *teedev,
 					 struct optee_msg_arg *arg)
 {
 	struct optee_msg_param *params = OPTEE_MSG_GET_PARAMS(arg);
@@ -306,7 +307,7 @@ static void handle_rpc_func_cmd_shm_free(struct tee_context *ctx,
 	shm = (struct tee_shm *)(unsigned long)params->u.value.b;
 	switch (params->u.value.a) {
 	case OPTEE_MSG_RPC_SHM_TYPE_APPL:
-		cmd_free_suppl(ctx, shm);
+		cmd_free_suppl(tee_get_drvdata(teedev), shm);
 		break;
 	case OPTEE_MSG_RPC_SHM_TYPE_KERNEL:
 		tee_shm_free(shm);
@@ -317,7 +318,7 @@ static void handle_rpc_func_cmd_shm_free(struct tee_context *ctx,
 	arg->ret = TEEC_SUCCESS;
 }
 
-static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
+static void handle_rpc_func_cmd(struct tee_device *teedev, struct optee *optee,
 				struct tee_shm *shm)
 {
 	struct optee_msg_arg *arg;
@@ -340,13 +341,13 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 		handle_rpc_func_cmd_wait(arg);
 		break;
 	case OPTEE_MSG_RPC_CMD_SHM_ALLOC:
-		handle_rpc_func_cmd_shm_alloc(ctx, arg);
+		handle_rpc_func_cmd_shm_alloc(teedev, arg);
 		break;
 	case OPTEE_MSG_RPC_CMD_SHM_FREE:
-		handle_rpc_func_cmd_shm_free(ctx, arg);
+		handle_rpc_func_cmd_shm_free(teedev, arg);
 		break;
 	default:
-		handle_rpc_supp_cmd(ctx, arg);
+		handle_rpc_supp_cmd(optee, arg);
 	}
 }
 
@@ -357,16 +358,15 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
  *
  * Result of RPC is written back into @param.
  */
-void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param)
+void optee_handle_rpc(struct tee_device *teedev, struct optee_rpc_param *param)
 {
-	struct tee_device *teedev = ctx->teedev;
 	struct optee *optee = tee_get_drvdata(teedev);
 	struct tee_shm *shm;
 	phys_addr_t pa;
 
 	switch (OPTEE_SMC_RETURN_GET_RPC_FUNC(param->a0)) {
 	case OPTEE_SMC_RPC_FUNC_ALLOC:
-		shm = tee_shm_alloc(ctx, param->a1, TEE_SHM_MAPPED);
+		shm = tee_shm_priv_alloc(teedev, param->a1);
 		if (!IS_ERR(shm) && !tee_shm_get_pa(shm, 0, &pa)) {
 			reg_pair_from_64(&param->a1, &param->a2, pa);
 			reg_pair_from_64(&param->a4, &param->a5,
@@ -392,7 +392,7 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param)
 		break;
 	case OPTEE_SMC_RPC_FUNC_CMD:
 		shm = reg_pair_to_ptr(param->a1, param->a2);
-		handle_rpc_func_cmd(ctx, optee, shm);
+		handle_rpc_func_cmd(teedev, optee, shm);
 		break;
 	default:
 		dev_warn(optee->dev, "Unknown RPC func 0x%x\n",

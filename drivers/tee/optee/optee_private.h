@@ -96,7 +96,9 @@ struct optee_supp {
  *			secure world sync object
  * @supp:		supplicant synchronization struct for RPC to supplicant
  * @pool:		shared memory pool
- * @ioremaped_shm	virtual address of memory in shared memory pool
+ * @ioremaped_shm:	virtual address of memory in shared memory pool
+ * @sec_caps:		secure world capabilities defined by
+ *			OPTEE_SMC_SEC_CAP_* in optee_smc.h
  */
 struct optee {
 	struct tee_device *supp_teedev;
@@ -108,6 +110,7 @@ struct optee {
 	struct optee_supp supp;
 	struct tee_shm_pool *pool;
 	void __iomem *ioremaped_shm;
+	u32 sec_caps;
 };
 
 struct optee_session {
@@ -132,12 +135,12 @@ struct optee_rpc_param {
 	u32	a7;
 };
 
-void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param);
+void optee_handle_rpc(struct tee_device *teedev, struct optee_rpc_param *param);
 
 void optee_wait_queue_init(struct optee_wait_queue *wq);
 void optee_wait_queue_exit(struct optee_wait_queue *wq);
 
-u32 optee_supp_thrd_req(struct tee_context *ctx, u32 func, size_t num_params,
+u32 optee_supp_thrd_req(struct optee *optee, u32 func, size_t num_params,
 			struct tee_param *param);
 
 int optee_supp_read(struct tee_context *ctx, void __user *buf, size_t len);
@@ -150,7 +153,7 @@ int optee_supp_recv(struct tee_context *ctx, u32 *func, u32 *num_params,
 int optee_supp_send(struct tee_context *ctx, u32 ret, u32 num_params,
 		    struct tee_param *param);
 
-u32 optee_do_call_with_arg(struct tee_context *ctx, phys_addr_t parg);
+u32 optee_do_call_with_arg(struct tee_device *teedev, phys_addr_t parg);
 int optee_open_session(struct tee_context *ctx,
 		       struct tee_ioctl_open_session_arg *arg,
 		       struct tee_param *param);
@@ -161,6 +164,10 @@ int optee_cancel_req(struct tee_context *ctx, u32 cancel_id, u32 session);
 
 void optee_enable_shm_cache(struct optee *optee);
 void optee_disable_shm_cache(struct optee *optee);
+
+int optee_shm_register(struct tee_device *teedev, struct tee_shm *shm,
+		       struct page **pages, size_t num_pages);
+int optee_shm_unregister(struct tee_device *teedev, struct tee_shm *shm);
 
 int optee_from_msg_param(struct tee_param *params, size_t num_params,
 			 const struct optee_msg_param *msg_params);

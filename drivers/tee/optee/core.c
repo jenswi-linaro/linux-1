@@ -100,6 +100,46 @@ int optee_from_msg_param(struct tee_param *params, size_t num_params,
 	return 0;
 }
 
+static int to_msg_param_tmp_mem(struct optee_msg_param *mp,
+				const struct tee_param *p)
+{
+	int rc;
+	phys_addr_t pa;
+
+	mp->attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT + p->attr -
+		   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
+
+	mp->u.tmem.shm_ref = (unsigned long)p->u.memref.shm;
+	mp->u.tmem.size = p->u.memref.size;
+
+	if (!p->u.memref.shm) {
+		mp->u.tmem.buf_ptr = 0;
+		return 0;
+	}
+
+	rc = tee_shm_get_pa(p->u.memref.shm, p->u.memref.shm_offs, &pa);
+	if (rc)
+		return rc;
+
+	mp->u.tmem.buf_ptr = pa;
+	mp->attr |= OPTEE_MSG_ATTR_CACHE_PREDEFINED <<
+		    OPTEE_MSG_ATTR_CACHE_SHIFT;
+
+	return 0;
+}
+
+static int to_msg_param_reg_mem(struct optee_msg_param *mp,
+				const struct tee_param *p)
+{
+	mp->attr = OPTEE_MSG_ATTR_TYPE_RMEM_INPUT + p->attr -
+		   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
+
+	mp->u.rmem.shm_ref = (unsigned long)p->u.memref.shm;
+	mp->u.rmem.size = p->u.memref.size;
+	mp->u.rmem.offs = p->u.memref.shm_offs;
+	return 0;
+}
+
 /**
  * optee_to_msg_param() - convert from struct tee_params to OPTEE_MSG parameters
  * @msg_params:	OPTEE_MSG parameters
@@ -112,7 +152,6 @@ int optee_to_msg_param(struct optee_msg_param *msg_params, size_t num_params,
 {
 	int rc;
 	size_t n;
-	phys_addr_t pa;
 
 	for (n = 0; n < num_params; n++) {
 		const struct tee_param *p = params + n;
@@ -135,22 +174,12 @@ int optee_to_msg_param(struct optee_msg_param *msg_params, size_t num_params,
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
-			mp->attr = OPTEE_MSG_ATTR_TYPE_TMEM_INPUT +
-				   p->attr -
-				   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
-			mp->u.tmem.shm_ref = (unsigned long)p->u.memref.shm;
-			mp->u.tmem.size = p->u.memref.size;
-			if (!p->u.memref.shm) {
-				mp->u.tmem.buf_ptr = 0;
-				break;
-			}
-			rc = tee_shm_get_pa(p->u.memref.shm,
-					    p->u.memref.shm_offs, &pa);
+			if (tee_shm_is_registered(p->u.memref.shm))
+				rc = to_msg_param_reg_mem(mp, p);
+			else
+				rc = to_msg_param_tmp_mem(mp, p);
 			if (rc)
 				return rc;
-			mp->u.tmem.buf_ptr = pa;
-			mp->attr |= OPTEE_MSG_ATTR_CACHE_PREDEFINED <<
-					OPTEE_MSG_ATTR_CACHE_SHIFT;
 			break;
 		default:
 			return -EINVAL;
@@ -167,6 +196,10 @@ static void optee_get_version(struct tee_device *teedev,
 		.impl_caps = TEE_OPTEE_CAP_TZ,
 		.gen_caps = TEE_GEN_CAP_GP,
 	};
+	struct optee *optee = tee_get_drvdata(teedev);
+
+	if (optee->sec_caps & OPTEE_SMC_SEC_CAP_REGISTER_SHM)
+		v.gen_caps |= TEE_GEN_CAP_REG_MEM;
 	*vers = v;
 }
 
@@ -216,7 +249,7 @@ static void optee_release(struct tee_context *ctx)
 	if (!ctxdata)
 		return;
 
-	shm = tee_shm_alloc(ctx, sizeof(struct optee_msg_arg), TEE_SHM_MAPPED);
+	shm = tee_shm_priv_alloc(teedev, sizeof(struct optee_msg_arg));
 	if (!IS_ERR(shm)) {
 		arg = tee_shm_get_va(shm, 0);
 		/*
@@ -236,7 +269,7 @@ static void optee_release(struct tee_context *ctx)
 			memset(arg, 0, sizeof(*arg));
 			arg->cmd = OPTEE_MSG_CMD_CLOSE_SESSION;
 			arg->session = sess->session_id;
-			optee_do_call_with_arg(ctx, parg);
+			optee_do_call_with_arg(teedev, parg);
 		}
 		kfree(sess);
 	}
@@ -262,6 +295,8 @@ static struct tee_driver_ops optee_ops = {
 	.close_session = optee_close_session,
 	.invoke_func = optee_invoke_func,
 	.cancel_req = optee_cancel_req,
+	.shm_register = optee_shm_register,
+	.shm_unregister = optee_shm_unregister,
 };
 
 static struct tee_desc optee_desc = {
@@ -276,6 +311,8 @@ static struct tee_driver_ops optee_supp_ops = {
 	.release = optee_release,
 	.supp_recv = optee_supp_recv,
 	.supp_send = optee_supp_send,
+	.shm_register = optee_shm_register,
+	.shm_unregister = optee_shm_unregister,
 };
 
 static struct tee_desc optee_supp_desc = {
@@ -475,6 +512,7 @@ static int optee_probe(struct platform_device *pdev)
 
 	optee->dev = &pdev->dev;
 	optee->invoke_fn = invoke_fn;
+	optee->sec_caps = sec_caps;
 
 	teedev = tee_device_alloc(&optee_desc, &pdev->dev, pool, optee);
 	if (IS_ERR(teedev)) {

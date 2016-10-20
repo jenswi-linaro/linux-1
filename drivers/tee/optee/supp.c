@@ -42,11 +42,10 @@ void optee_supp_uninit(struct optee_supp *supp)
  *
  * Returns result of operation to be passed to secure world
  */
-u32 optee_supp_thrd_req(struct tee_context *ctx, u32 func, size_t num_params,
+u32 optee_supp_thrd_req(struct optee *optee, u32 func, size_t num_params,
 			struct tee_param *param)
 {
 	bool interruptable;
-	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct optee_supp *supp = &optee->supp;
 	u32 ret;
 
