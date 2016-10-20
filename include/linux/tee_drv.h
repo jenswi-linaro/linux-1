@@ -25,8 +25,11 @@
  * specific TEE driver.
  */
 
-#define TEE_SHM_MAPPED		0x1	/* Memory mapped by the kernel */
-#define TEE_SHM_DMA_BUF		0x2	/* Memory with dma-buf handle */
+#define TEE_SHM_MAPPED		BIT(0)	/* Memory mapped by the kernel */
+#define TEE_SHM_DMA_BUF		BIT(1)	/* Memory with dma-buf handle */
+#define TEE_SHM_REGISTER	BIT(2)	/* Memory registered in secure world */
+#define TEE_SHM_USER_MAPPED	BIT(3)	/* Memory mapped in user space */
+#define TEE_SHM_POOL		BIT(4)	/* Memory allocated from pool */
 
 struct tee_device;
 struct tee_shm;
@@ -93,6 +96,9 @@ struct tee_driver_ops {
 			 struct tee_param *param);
 	int (*supp_send)(struct tee_context *ctx, u32 ret, u32 num_params,
 			 struct tee_param *param);
+	int (*shm_register)(struct tee_device *teedev, struct tee_shm *shm,
+			    struct page **pages, size_t num_pages);
+	int (*shm_unregister)(struct tee_device *teedev, struct tee_shm *shm);
 };
 
 /**
@@ -211,6 +217,11 @@ void *tee_get_drvdata(struct tee_device *teedev);
  */
 struct tee_shm *tee_shm_alloc(struct tee_context *ctx, size_t size, u32 flags);
 
+struct tee_shm *tee_shm_priv_alloc(struct tee_device *teedev, size_t size);
+
+struct tee_shm *tee_shm_register(struct tee_context *ctx, unsigned long addr,
+				 size_t length, u32 flags);
+
 /**
  * tee_shm_free() - Free shared memory
  * @shm:	Handle to shared memory to free
@@ -259,6 +270,8 @@ void *tee_shm_get_va(struct tee_shm *shm, size_t offs);
  *	error code.
  */
 int tee_shm_get_pa(struct tee_shm *shm, size_t offs, phys_addr_t *pa);
+
+bool tee_shm_is_registered(struct tee_shm *shm);
 
 /**
  * tee_shm_get_id() - Get id of a shared memory object
