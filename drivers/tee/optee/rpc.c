@@ -24,6 +24,10 @@
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
+
+//XXX
+#include <linux/dma-buf.h>
 
 struct wq_entry {
 	struct list_head link;
@@ -370,6 +374,30 @@ void optee_rpc_finalize_call(struct optee_call_ctx *call_ctx)
 	free_pages_list(call_ctx);
 }
 
+static u32 bench_reg_new(u64 size, u64 paddr)
+{
+	u32 ret;
+
+	down_write(&optee_bench_ts_rwsem);
+	optee_bench_ts_global = memremap(paddr, size, MEMREMAP_WB);
+	if (optee_bench_ts_global)
+		ret = TEEC_SUCCESS;
+	else
+		ret = TEEC_ERROR_BAD_PARAMETERS;
+	up_write(&optee_bench_ts_rwsem);
+
+	return TEEC_SUCCESS;
+}
+
+static void bench_reg_del(void)
+{
+	down_write(&optee_bench_ts_rwsem);
+	if (optee_bench_ts_global)
+		memunmap(optee_bench_ts_global);
+	optee_bench_ts_global = NULL;
+	up_write(&optee_bench_ts_rwsem);
+}
+
 static void handle_rpc_func_cmd_bm_reg(struct optee_msg_arg *arg)
 {
 	u64 size;
@@ -388,21 +416,11 @@ static void handle_rpc_func_cmd_bm_reg(struct optee_msg_arg *arg)
 	case OPTEE_RPC_CMD_BENCH_REG_NEW:
 		size = arg->params[0].u.value.c;
 		paddr = arg->params[0].u.value.b;
-		down_write(&optee_bench_ts_rwsem);
-		optee_bench_ts_global =
-			memremap(paddr, size, MEMREMAP_WB);
-		if (!optee_bench_ts_global) {
-			up_write(&optee_bench_ts_rwsem);
+		if (bench_reg_new(size, paddr))
 			goto bad;
-		}
-		up_write(&optee_bench_ts_rwsem);
 		break;
 	case OPTEE_RPC_CMD_BENCH_REG_DEL:
-		down_write(&optee_bench_ts_rwsem);
-		if (optee_bench_ts_global)
-			memunmap(optee_bench_ts_global);
-		optee_bench_ts_global = NULL;
-		up_write(&optee_bench_ts_rwsem);
+		bench_reg_del();
 		break;
 	default:
 		goto bad;
@@ -504,4 +522,186 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 	}
 
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
+}
+
+static bool check_attr(u_int num_params, struct optee_spci_param *params,
+		       u32 attr)
+{
+	return num_params == 1 &&
+	       (params->attr & OPTEE_SPCI_ATTR_TYPE_MASK) == attr;
+}
+static u32 spci_rpc_cmd_get_time(u_int num_params,
+				 struct optee_spci_param *params)
+{
+	struct timespec64 ts;
+
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_OUTPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	getnstimeofday64(&ts);
+	params->u.value.a = ts.tv_sec;
+	params->u.value.b = ts.tv_nsec;
+
+	return TEEC_SUCCESS;
+}
+
+static u32 spci_rpc_cmd_wait_queue(struct optee *optee, u_int num_params,
+				   struct optee_spci_param *params)
+{
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	switch (params->u.value.a) {
+	case OPTEE_RPC_WAIT_QUEUE_SLEEP:
+		wq_sleep(&optee->wait_queue, params->u.value.b);
+		return TEEC_SUCCESS;
+	case OPTEE_RPC_WAIT_QUEUE_WAKEUP:
+		wq_wakeup(&optee->wait_queue, params->u.value.b);
+		return TEEC_SUCCESS;
+	default:
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+}
+
+static u32 spci_rpc_cmd_suspend(u_int num_params,
+				struct optee_spci_param *params)
+{
+	u32 msec_to_wait;
+
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	msec_to_wait = params->u.value.a;
+
+	/* Go to interruptible sleep */
+	msleep_interruptible(msec_to_wait);
+
+	return TEEC_SUCCESS;
+}
+
+static u32 spci_rpc_cmd_shm_alloc(struct tee_context *ctx, u_int num_params,
+				   struct optee_spci_param *params)
+{
+	struct tee_shm *shm;
+	size_t sz;
+
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	sz = params->u.value.b;
+	switch (params->u.value.a) {
+	case OPTEE_RPC_SHM_TYPE_APPL:
+		shm = cmd_alloc_suppl(ctx, sz);
+		break;
+	case OPTEE_RPC_SHM_TYPE_KERNEL:
+		shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED|TEE_SHM_REGISTER);
+		break;
+	case OPTEE_RPC_SHM_TYPE_GLOBAL:
+		shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED|TEE_SHM_DMA_BUF|
+					     TEE_SHM_REGISTER);
+		break;
+	default:
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if (IS_ERR(shm))
+		return TEEC_ERROR_OUT_OF_MEMORY;
+
+	params->attr = OPTEE_SPCI_ATTR_TYPE_MEMREF_OUTPUT;
+	params->u.memref.offs = 0;
+	params->u.memref.size = tee_shm_get_size(shm);
+	params->u.memref.shm_ref = shm->sec_world_id;
+
+	return TEEC_SUCCESS;
+}
+
+static u32 spci_rpc_cmd_shm_free(struct tee_context *ctx, u_int num_params,
+				 struct optee_spci_param *params)
+{
+	struct tee_shm *shm;
+
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	shm = optee_spci_find_from_handle(ctx, params->u.value.b);
+	if (IS_ERR(shm))
+		return TEEC_ERROR_BAD_PARAMETERS;
+	switch (params->u.value.a) {
+	case OPTEE_RPC_SHM_TYPE_APPL:
+		cmd_free_suppl(ctx, shm);
+		return TEEC_SUCCESS;
+	case OPTEE_RPC_SHM_TYPE_KERNEL:
+	case OPTEE_RPC_SHM_TYPE_GLOBAL:
+		tee_shm_free(shm);
+		return TEEC_SUCCESS;
+	default:
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+}
+
+static u32 spci_rpc_cmd_bench_reg(u_int num_params,
+				  struct optee_spci_param *params)
+{
+	if (!check_attr(num_params, params, OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT))
+		return TEEC_ERROR_BAD_PARAMETERS;
+
+	switch (params->u.value.a) {
+	case OPTEE_RPC_CMD_BENCH_REG_NEW:
+		return bench_reg_new(params->u.value.c, params->u.value.b);
+	case OPTEE_RPC_CMD_BENCH_REG_DEL:
+		bench_reg_del();
+		return TEEC_SUCCESS;
+	default:
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+}
+
+static u32 spci_rpc_supp_cmd(struct tee_context *ctx, u32 cmd, u_int num_params,
+				    struct optee_spci_param *spci_params)
+{
+	struct tee_param *params;
+	u32 ret;
+
+	params = kmalloc_array(num_params, sizeof(struct tee_param),
+			       GFP_KERNEL);
+	if (!params)
+		return TEEC_ERROR_OUT_OF_MEMORY;
+
+	if (optee_from_spci_param(ctx, params, num_params, spci_params)) {
+		ret = TEEC_ERROR_BAD_PARAMETERS;
+		goto out;
+	}
+
+	ret = optee_supp_thrd_req(ctx, cmd, num_params, params);
+
+	if (optee_to_spci_param(spci_params, num_params, params))
+		ret = TEEC_ERROR_BAD_PARAMETERS;
+out:
+	kfree(params);
+	return ret;
+}
+
+u32 optee_spci_handle_rpc(struct tee_context *ctx, u32 cmd, u_int num_params,
+			  struct optee_spci_param *params)
+{
+	switch (cmd) {
+	case OPTEE_RPC_CMD_GET_TIME:
+		return spci_rpc_cmd_get_time(num_params, params);
+	case OPTEE_RPC_CMD_WAIT_QUEUE:
+		return spci_rpc_cmd_wait_queue(tee_get_drvdata(ctx->teedev),
+					      num_params, params);
+	case OPTEE_RPC_CMD_SUSPEND:
+		return spci_rpc_cmd_suspend(num_params, params);
+	case OPTEE_RPC_CMD_SHM_ALLOC:
+		return spci_rpc_cmd_shm_alloc(ctx, num_params, params);
+	case OPTEE_RPC_CMD_SHM_FREE:
+		return spci_rpc_cmd_shm_free(ctx, num_params, params);
+	case OPTEE_RPC_CMD_BENCH_REG:
+		return spci_rpc_cmd_bench_reg(num_params, params);
+	case OPTEE_RPC_CMD_INTERRUPT:
+		/* The interrupt has been delivered by now */
+		return TEEC_SUCCESS;
+	default:
+		return spci_rpc_supp_cmd(ctx, cmd, num_params, params);
+	}
 }

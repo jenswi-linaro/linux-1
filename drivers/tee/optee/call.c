@@ -11,6 +11,9 @@
  * GNU General Public License for more details.
  *
  */
+
+#define pr_fmt(fmt) "%s: " fmt, __func__
+
 #include <linux/arm-smccc.h>
 #include <linux/device.h>
 #include <linux/err.h>
@@ -20,9 +23,11 @@
 #include <linux/tee_drv.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include "optee_bench.h"
 #include "optee_private.h"
 #include "optee_smc.h"
-#include "optee_bench.h"
+#include "optee_spci.h"
+#include "spci.h"
 
 struct optee_call_waiter {
 	struct list_head list_node;
@@ -309,7 +314,7 @@ int optee_close_session_helper(struct tee_context *ctx, u32 session)
 	return 0;
 }
 
-int optee_close_session(struct tee_context *ctx, u32 session)
+int remove_session(struct tee_context *ctx, u32 session)
 {
 	struct optee_context_data *ctxdata = ctx->data;
 	struct optee_session *sess;
@@ -324,8 +329,19 @@ int optee_close_session(struct tee_context *ctx, u32 session)
 		return -EINVAL;
 	kfree(sess);
 
+	return 0;
+}
+
+int optee_close_session(struct tee_context *ctx, u32 session)
+{
+	int rc = remove_session(ctx, session);
+
+	if (rc)
+		return rc;
+
 	return optee_close_session_helper(ctx, session);
 }
+
 
 int optee_invoke_func(struct tee_context *ctx, struct tee_ioctl_invoke_arg *arg,
 		      struct tee_param *param)
@@ -671,4 +687,416 @@ int optee_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
 int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 {
 	return 0;
+}
+
+static int optee_spci_do_call(struct tee_context *ctx, struct tee_shm *shm,
+			      struct optee_spci *arg)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct optee_call_waiter w;
+	int rc;
+	u32 a0 = SPCI_REQUEST_START_64;
+	u_long a1 = shm->sec_world_id;
+	u_long a3 = shm->size;
+	u32 a7 = optee->spci.sp_handle << 16;
+
+	/* Initialize waiter */
+	optee_cq_wait_init(&optee->call_queue, &w);
+	while (true) {
+		struct arm_smccc_res res;
+
+		optee_bm_timestamp();
+
+		optee->invoke_fn(a0, a1, 0, a3, 0, 0, 0, a7, &res);
+		rc = res.a0;
+
+		optee_bm_timestamp();
+
+		if (rc == SPCI_INTERRUPT) {
+			a0 = SPCI_REQUEST_RESUME_64;
+			a1 = res.a1; /* token */
+			a3 = 0;
+		} else if (rc == SPCI_QUEUED) {
+			u_int nparams = arg->rpc_num_params;
+			struct optee_spci_param *params = arg->params +
+							  arg->num_params;
+
+			arg->rpc_ret = optee_spci_handle_rpc(ctx, arg->rpc_cmd,
+							     nparams, params);
+			a0 = SPCI_REQUEST_RESUME_64;
+			a1 = res.a1; /* token */
+			a3 = 0;
+		} else if (rc == SPCI_ETHRDLMT) {
+			/*
+			 * Out of threads in secure world, wait for a thread
+			 * become available.
+			 */
+			optee_cq_wait_for_completion(&optee->call_queue, &w);
+		} else {
+			break;
+		}
+
+	}
+
+	/*
+	 * We're done with our thread in secure world, if there's any
+	 * thread waiters wake up one.
+	 */
+	optee_cq_wait_final(&optee->call_queue, &w);
+
+	return rc;
+}
+
+static int spci_shm_unregister(struct tee_context *ctx, u_long spci_handle)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct arm_smccc_res res;
+
+	optee->invoke_fn(SPCI_SHM_UNREGISTER_64, spci_handle, 0, 0, 0, 0, 0,
+			 optee->spci.sp_handle << 16, &res);
+
+	switch (res.a0) {
+	case SPCI_SUCCESS:
+		return 0;
+	case SPCI_DENIED:
+		return -EBUSY;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int register_spci_contiguous(struct tee_context *ctx,
+				    struct tee_shm *shm, u_long *spci_handle)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct arm_smccc_res res;
+	phys_addr_t pa;
+	u_int num_pages;
+	int rc;
+
+	rc = tee_shm_get_pa(shm, tee_shm_get_page_offset(shm), &pa);
+	if (rc)
+		return rc;
+
+	num_pages = (tee_shm_get_size(shm) + PAGE_SIZE - 1) / PAGE_SIZE;
+	optee->invoke_fn(SPCI_SHM_REGISTER_64, pa, num_pages, 0 /*PAGE_SIZE*/,
+			 0, 0, 0, optee->spci.sp_handle << 16, &res);
+
+	switch (res.a0) {
+	case SPCI_SUCCESS:
+		*spci_handle = res.a1;
+		return 0;
+	case SPCI_NO_MEMORY:
+		return -ENOMEM;
+	default:
+		return -EINVAL;
+	}
+}
+
+static int register_spci_pages(struct tee_context *ctx, struct tee_shm *shm,
+			       struct page **pages, size_t num_pages,
+			       u_long *spci_handle)
+{
+	//struct optee *optee = tee_get_drvdata(ctx->teedev);
+	int rc;
+	struct tee_shm *shm_arg;
+	size_t s;
+	size_t n;
+	u64 *p;
+
+	if (check_mul_overflow(num_pages, sizeof(u64), &s))
+		return -EINVAL;
+
+	shm_arg = tee_shm_alloc(ctx, s, TEE_SHM_MAPPED|TEE_SHM_REGISTER);
+	if (IS_ERR(shm_arg))
+		return PTR_ERR(shm_arg);
+
+	p = tee_shm_get_va(shm, 0);
+	if (IS_ERR(p)) {
+		rc = PTR_ERR(p);
+		goto out;
+	}
+
+	for (n = 0; n < num_pages; n++)
+		p[n] = page_to_phys(pages[n]);
+
+	/* TODO communicate pages to secure world */
+	rc = -1;
+	*spci_handle = 0;
+	BUG_ON(rc);
+out:
+	tee_shm_free(shm_arg);
+	return rc;
+}
+
+int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			    struct page **pages, size_t num_pages,
+			    unsigned long start)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	u_long spci_handle = 0;
+	u32 id;
+	int rc;
+
+	if (num_pages) {
+		rc = check_mem_type(start, num_pages);
+		if (rc)
+			return rc;
+
+		rc = register_spci_pages(ctx, shm, pages, num_pages,
+					 &spci_handle);
+	} else {
+		rc = register_spci_contiguous(ctx, shm, &spci_handle);
+	}
+
+	if (rc)
+		return rc;
+
+	id = spci_handle;
+	if (id != spci_handle) {
+		pr_err("Too large value (%lu) for spci_handle\n", spci_handle);
+		spci_shm_unregister(ctx, spci_handle);
+		return -EINVAL;
+	}
+
+	mutex_lock(&optee->spci.mutex);
+	rc = idr_alloc_u32(&optee->spci.idr, shm, &id, id, GFP_KERNEL);
+	mutex_unlock(&optee->spci.mutex);
+
+	if (rc)
+		spci_shm_unregister(ctx, spci_handle);
+	else
+		shm->sec_world_id = id;
+
+	return rc;
+}
+
+int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	void *p;
+
+	mutex_lock(&optee->spci.mutex);
+	p = idr_remove(&optee->spci.idr, shm->sec_world_id);
+	BUG_ON(p != shm);
+	mutex_unlock(&optee->spci.mutex);
+
+	return spci_shm_unregister(ctx, shm->sec_world_id);
+}
+
+struct tee_shm *optee_spci_find_from_handle(struct tee_context *ctx,
+					    u_long spci_handle)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct tee_shm *shm;
+
+	if (!ctx)
+		return ERR_PTR(-EINVAL);
+
+	mutex_lock(&optee->spci.mutex);
+	shm = idr_find(&optee->spci.idr, spci_handle);
+	mutex_unlock(&optee->spci.mutex);
+
+	if (!shm)
+		return ERR_PTR(-EINVAL);
+
+	return shm;
+}
+
+static struct tee_shm *get_spci_arg(struct tee_context *ctx, size_t num_params,
+				    struct optee_spci **spci_arg)
+{
+	struct tee_shm *shm;
+	struct optee_spci *sa;
+	size_t sz = OPTEE_SPCI_GET_SIZE(num_params, OPTEE_SPCI_RPC_NUM_PARAMS);
+
+	shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED|TEE_SHM_REGISTER);
+	if (IS_ERR(shm))
+		return shm;
+
+	sa = tee_shm_get_va(shm, 0);
+	if (IS_ERR(sa)) {
+		tee_shm_free(shm);
+		return (void *)sa;
+	}
+
+	memset(sa, 0, sz);
+	sa->num_params = num_params;
+	sa->rpc_num_params = OPTEE_SPCI_RPC_NUM_PARAMS;
+	*spci_arg = sa;
+
+	return shm;
+}
+
+int optee_spci_close_session_helper(struct tee_context *ctx, u32 session)
+{
+	struct tee_shm *shm;
+	struct optee_spci *spci_arg;
+
+	shm = get_spci_arg(ctx, 0, &spci_arg);
+	if (IS_ERR(shm))
+		return PTR_ERR(shm);
+
+	spci_arg->cmd = OPTEE_SPCI_CMD_CLOSE_SESSION;
+	spci_arg->session = session;
+	optee_spci_do_call(ctx, shm, spci_arg);
+
+	tee_shm_free(shm);
+
+	return 0;
+}
+
+int optee_spci_close_session(struct tee_context *ctx, u32 session)
+{
+	int rc = remove_session(ctx, session);
+
+	if (rc)
+		return rc;
+
+	return optee_spci_close_session_helper(ctx, session);
+}
+
+int optee_spci_invoke_func(struct tee_context *ctx,
+			   struct tee_ioctl_invoke_arg *arg,
+			   struct tee_param *param)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct tee_shm *shm;
+	struct optee_spci *spci_arg;
+	struct optee_session *sess;
+	int rc;
+
+	/* Check that the session is valid */
+	mutex_lock(&ctxdata->mutex);
+	sess = find_session(ctxdata, arg->session);
+	mutex_unlock(&ctxdata->mutex);
+	if (!sess)
+		return -EINVAL;
+
+	shm = get_spci_arg(ctx, arg->num_params, &spci_arg);
+	if (IS_ERR(shm))
+		return PTR_ERR(shm);
+	spci_arg->cmd = OPTEE_SPCI_CMD_INVOKE_COMMAND;
+	spci_arg->func = arg->func;
+	spci_arg->session = arg->session;
+	spci_arg->cancel_id = arg->cancel_id;
+
+	rc = optee_to_spci_param(spci_arg->params, arg->num_params, param);
+	if (rc)
+		goto out;
+
+	if (optee_spci_do_call(ctx, shm, spci_arg)) {
+		spci_arg->ret = TEEC_ERROR_COMMUNICATION;
+		spci_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	if (optee_from_spci_param(ctx, param, arg->num_params,
+				  spci_arg->params)) {
+		spci_arg->ret = TEEC_ERROR_COMMUNICATION;
+		spci_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	arg->ret = spci_arg->ret;
+	arg->ret_origin = spci_arg->ret_origin;
+out:
+	tee_shm_free(shm);
+	return rc;
+}
+
+int optee_spci_cancel_req(struct tee_context *ctx, u32 cancel_id, u32 session)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct tee_shm *shm;
+	struct optee_spci *spci_arg;
+	struct optee_session *sess;
+
+	/* Check that the session is valid */
+	mutex_lock(&ctxdata->mutex);
+	sess = find_session(ctxdata, session);
+	mutex_unlock(&ctxdata->mutex);
+	if (!sess)
+		return -EINVAL;
+
+	shm = get_spci_arg(ctx, 0, &spci_arg);
+	if (IS_ERR(shm))
+		return PTR_ERR(shm);
+
+	spci_arg->cmd = OPTEE_SPCI_CMD_CANCEL;
+	spci_arg->session = session;
+	spci_arg->cancel_id = cancel_id;
+	optee_spci_do_call(ctx, shm, spci_arg);
+
+	tee_shm_free(shm);
+	return 0;
+}
+int optee_spci_open_session(struct tee_context *ctx,
+			    struct tee_ioctl_open_session_arg *arg,
+			    struct tee_param *param)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	int rc;
+	struct tee_shm *shm;
+	struct optee_spci *spci_arg;
+	struct optee_session *sess = NULL;
+
+	/* +2 for the meta parameters added below */
+	shm = get_spci_arg(ctx, arg->num_params + 2, &spci_arg);
+	if (IS_ERR(shm))
+		return PTR_ERR(shm);
+
+	spci_arg->cmd = OPTEE_SPCI_CMD_OPEN_SESSION;
+	spci_arg->cancel_id = arg->cancel_id;
+
+	/*
+	 * Initialize and add the meta parameters needed when opening a
+	 * session.
+	 */
+	spci_arg->params[0].attr = OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT |
+				   OPTEE_SPCI_ATTR_META;
+	spci_arg->params[1].attr = OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT |
+				   OPTEE_SPCI_ATTR_META;
+	memcpy(&spci_arg->params[0].u.value, arg->uuid, sizeof(arg->uuid));
+	memcpy(&spci_arg->params[1].u.value, arg->uuid, sizeof(arg->clnt_uuid));
+	spci_arg->params[1].u.value.c = arg->clnt_login;
+
+	rc = optee_to_spci_param(spci_arg->params + 2, arg->num_params, param);
+	if (rc)
+		goto out;
+
+	sess = kzalloc(sizeof(*sess), GFP_KERNEL);
+	if (!sess) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	if (optee_spci_do_call(ctx, shm, spci_arg)) {
+		spci_arg->ret = TEEC_ERROR_COMMUNICATION;
+		spci_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	if (spci_arg->ret == TEEC_SUCCESS) {
+		/* A new session has been created, add it to the list. */
+		sess->session_id = spci_arg->session;
+		mutex_lock(&ctxdata->mutex);
+		list_add(&sess->list_node, &ctxdata->sess_list);
+		mutex_unlock(&ctxdata->mutex);
+	} else {
+		kfree(sess);
+	}
+
+	if (optee_from_spci_param(ctx, param, arg->num_params,
+				  spci_arg->params + 2)) {
+		arg->ret = TEEC_ERROR_COMMUNICATION;
+		arg->ret_origin = TEEC_ORIGIN_COMMS;
+		/* Close session again to avoid leakage */
+		optee_spci_close_session(ctx, spci_arg->session);
+	} else {
+		arg->session = spci_arg->session;
+		arg->ret = spci_arg->ret;
+		arg->ret_origin = spci_arg->ret_origin;
+	}
+out:
+	tee_shm_free(shm);
+
+	return rc;
 }

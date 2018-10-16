@@ -29,7 +29,9 @@
 #include "optee_bench.h"
 #include "optee_private.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
 #include "shm_pool.h"
+#include "spci.h"
 
 #define DRIVER_NAME "optee"
 
@@ -213,6 +215,106 @@ int optee_to_msg_param(struct optee_msg_param *msg_params, size_t num_params,
 	return 0;
 }
 
+int optee_from_spci_param(struct tee_context *ctx, struct tee_param *params,
+			  size_t num_params,
+			  const struct optee_spci_param *spci_params)
+{
+	size_t n;
+	struct tee_shm *shm;
+
+	for (n = 0; n < num_params; n++) {
+		struct tee_param *p = params + n;
+		const struct optee_spci_param *sp = spci_params + n;
+		u32 attr = sp->attr & OPTEE_SPCI_ATTR_TYPE_MASK;
+
+		switch (attr) {
+		case OPTEE_SPCI_ATTR_TYPE_NONE:
+			p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
+			memset(&p->u, 0, sizeof(p->u));
+			break;
+		case OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT:
+		case OPTEE_SPCI_ATTR_TYPE_VALUE_OUTPUT:
+		case OPTEE_SPCI_ATTR_TYPE_VALUE_INOUT:
+			p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INPUT +
+				  attr - OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT;
+			p->u.value.a = sp->u.value.a;
+			p->u.value.b = sp->u.value.b;
+			p->u.value.c = sp->u.value.c;
+			break;
+		case OPTEE_SPCI_ATTR_TYPE_MEMREF_INPUT:
+		case OPTEE_SPCI_ATTR_TYPE_MEMREF_OUTPUT:
+		case OPTEE_SPCI_ATTR_TYPE_MEMREF_INOUT:
+			p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT +
+				  attr - OPTEE_SPCI_ATTR_TYPE_MEMREF_INPUT;
+			p->u.memref.size = sp->u.memref.size;
+			shm = optee_spci_find_from_handle(ctx,
+							  sp->u.memref.shm_ref);
+			if (IS_ERR(shm)) {
+				p->u.memref.shm_offs = 0;
+				p->u.memref.shm = NULL;
+			} else {
+				p->u.memref.shm_offs = sp->u.memref.offs;
+				p->u.memref.shm = shm;
+			}
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
+int optee_to_spci_param(struct optee_spci_param *spci_params, size_t num_params,
+			const struct tee_param *params)
+{
+	size_t n;
+
+	for (n = 0; n < num_params; n++) {
+		const struct tee_param *p = params + n;
+		struct optee_spci_param *sp = spci_params + n;
+		struct tee_shm *shm;
+
+		switch (p->attr) {
+		case TEE_IOCTL_PARAM_ATTR_TYPE_NONE:
+			sp->attr = TEE_IOCTL_PARAM_ATTR_TYPE_NONE;
+			memset(&sp->u, 0, sizeof(sp->u));
+			break;
+		case TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_OUTPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INOUT:
+			sp->attr = OPTEE_SPCI_ATTR_TYPE_VALUE_INPUT + p->attr -
+				   TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INPUT;
+			sp->u.value.a = p->u.value.a;
+			sp->u.value.b = p->u.value.b;
+			sp->u.value.c = p->u.value.c;
+			break;
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
+		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
+			shm = p->u.memref.shm;
+			if (shm) {
+				if (!tee_shm_is_registered(shm))
+					return -EINVAL;
+				sp->u.memref.shm_ref = shm->sec_world_id;
+				sp->u.memref.offs = p->u.memref.shm_offs;
+			} else {
+				sp->u.memref.shm_ref = -1;
+				sp->u.memref.offs = 0;
+			}
+
+			sp->attr = OPTEE_SPCI_ATTR_TYPE_MEMREF_INPUT + p->attr -
+				   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
+			sp->u.memref.size = p->u.memref.size;
+			break;
+		default:
+			return -EINVAL;
+		}
+	}
+
+	return 0;
+}
+
 static void optee_get_version(struct tee_device *teedev,
 			      struct tee_ioctl_version_data *vers)
 {
@@ -294,6 +396,19 @@ static void optee_release_supp(struct tee_context *ctx)
 	optee_supp_release(&optee->supp);
 }
 
+static void optee_spci_release(struct tee_context *ctx)
+{
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+}
+
+static void optee_spci_release_supp(struct tee_context *ctx)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+	optee_supp_release(&optee->supp);
+}
+
 static const struct tee_driver_ops optee_ops = {
 	.get_version = optee_get_version,
 	.open = optee_open,
@@ -307,7 +422,7 @@ static const struct tee_driver_ops optee_ops = {
 };
 
 static const struct tee_desc optee_desc = {
-	.name = DRIVER_NAME "-clnt",
+	.name = DRIVER_NAME "legacy-clnt",
 	.ops = &optee_ops,
 	.owner = THIS_MODULE,
 };
@@ -323,10 +438,46 @@ static const struct tee_driver_ops optee_supp_ops = {
 };
 
 static const struct tee_desc optee_supp_desc = {
-	.name = DRIVER_NAME "-supp",
+	.name = DRIVER_NAME "legacy-supp",
 	.ops = &optee_supp_ops,
 	.owner = THIS_MODULE,
 	.flags = TEE_DESC_PRIVILEGED,
+};
+
+static const struct tee_driver_ops optee_spci_ops = {
+	.get_version = optee_get_version,
+	.open = optee_open,
+	.release = optee_spci_release,
+	.open_session = optee_spci_open_session,
+	.close_session = optee_spci_close_session,
+	.invoke_func = optee_spci_invoke_func,
+	.cancel_req = optee_spci_cancel_req,
+	.shm_register = optee_spci_shm_register,
+	.shm_unregister = optee_spci_shm_unregister,
+};
+
+static const struct tee_desc optee_spci_desc = {
+	.name = DRIVER_NAME "-spci-clnt",
+	.ops = &optee_spci_ops,
+	.owner = THIS_MODULE,
+	.flags = TEE_DESC_ALWAYS_REGISTER_SHM,
+};
+
+static const struct tee_driver_ops optee_spci_supp_ops = {
+	.get_version = optee_get_version,
+	.open = optee_open,
+	.release = optee_spci_release_supp,
+	.supp_recv = optee_supp_recv,
+	.supp_send = optee_supp_send,
+	.shm_register = optee_spci_shm_register,
+	.shm_unregister = optee_spci_shm_unregister,
+};
+
+static const struct tee_desc optee_spci_supp_desc = {
+	.name = DRIVER_NAME "-spci-supp",
+	.ops = &optee_spci_supp_ops,
+	.owner = THIS_MODULE,
+	.flags = TEE_DESC_PRIVILEGED | TEE_DESC_ALWAYS_REGISTER_SHM,
 };
 
 static bool optee_msg_api_uid_is_optee_api(optee_invoke_fn *invoke_fn)
@@ -617,7 +768,7 @@ err:
 	return ERR_PTR(rc);
 }
 
-static struct optee *optee_probe(struct device_node *np)
+static struct optee *optee_probe_legacy(struct device_node *np)
 {
 	struct optee *optee;
 	struct tee_shm_pool *pool;
@@ -669,6 +820,166 @@ static struct optee *optee_probe(struct device_node *np)
 	return optee;
 }
 
+static bool optee_spci_version_is_compatible(optee_invoke_fn *invoke_fn)
+{
+	struct arm_smccc_res res;
+	u_int major;
+	u_int minor;
+
+	invoke_fn(SPCI_VERSION, 0, 0, 0, 0, 0, 0, 0, &res);
+
+	if (res.a0 == SPCI_NOT_SUPPORTED)
+		return false;
+
+	major = (res.a0 >> SPCI_VERSION_MAJOR_SHIFT) & SPCI_VERSION_MAJOR_MASK;
+	minor = (res.a0 >> SPCI_VERSION_MINOR_SHIFT) & SPCI_VERSION_MINOR_MASK;
+
+	return (major == SPCI_VERSION_MAJOR) && (minor >= SPCI_VERSION_MINOR);
+}
+
+static bool optee_spci_handle_open(optee_invoke_fn *invoke_fn, u16 *sp_handle)
+{
+	struct arm_smccc_res res;
+
+	invoke_fn(SPCI_HANDLE_OPEN, OPTEE_MSG_UID_0, OPTEE_MSG_UID_1,
+		  OPTEE_MSG_UID_2, OPTEE_MSG_UID_3, 0, 0, 0, &res);
+	if (res.a0 != SPCI_SUCCESS)
+		return false;
+
+	*sp_handle = res.a1 >> 16;
+	return true;
+}
+
+static bool optee_spci_exchange_capabilities(optee_invoke_fn *invoke_fn,
+					     u16 sp_handle, u32 *sec_caps)
+{
+	struct arm_smccc_res res;
+
+	invoke_fn(SPCI_REQUEST_BLOCKING_BY_VAL_32,
+		  OPTEE_SPCI_VAL_REQ_EXCHANGE_CAPABILITIES, 0, 0, 0, 0, 0,
+		  (u32)sp_handle << 16, &res);
+
+	if (res.a0)
+		return false;
+
+	if (res.a1) {
+		pr_warn("Ignoring unknown secure world capabilities %#lx\n",
+			res.a1);
+		res.a1 = 0;
+	}
+	*sec_caps = res.a1;
+
+	return true;
+}
+
+static void optee_spci_get_resource(optee_invoke_fn *invoke_fn, u_int idx,
+				    u_int type, struct arm_smccc_res *res)
+{
+	invoke_fn(SPCI_GET_RESOURCE, idx, type, 0, 0, 0, 0, 0, res);
+}
+
+static u32 optee_spci_get_shm_config(optee_invoke_fn *invoke_fn, u_int idx,
+				      phys_addr_t *base, size_t *sz)
+{
+	struct arm_smccc_res res;
+
+	optee_spci_get_resource(invoke_fn, idx, SPCI_RES_TYPE_UUID_UPPER, &res);
+	if (res.a0)
+		return res.a0;
+	if (res.a1 != OPTEE_MSG_UID_0 || res.a2 != OPTEE_MSG_UID_1)
+		return SPCI_NOT_PRESENT;
+
+	optee_spci_get_resource(invoke_fn, idx, SPCI_RES_TYPE_UUID_LOWER, &res);
+	if (res.a0)
+		return res.a0;
+	if (res.a1 != OPTEE_MSG_UID_2 || res.a2 != OPTEE_MSG_UID_3)
+		return SPCI_NOT_PRESENT;
+
+	optee_spci_get_resource(invoke_fn, idx, SPCI_RES_TYPE_ATTR_SIZE, &res);
+	if (res.a0)
+		return res.a0;
+	if (res.a1) /* Check it's "normal memory" */
+		return SPCI_NOT_PRESENT;
+	*sz = reg_pair_to_64(res.a2, res.a3);
+
+	optee_spci_get_resource(invoke_fn, idx, SPCI_RES_TYPE_BASE_ADDR, &res);
+	if (res.a0)
+		return res.a0;
+	*base = reg_pair_to_64(res.a1, res.a2);
+
+	return SPCI_SUCCESS;
+}
+
+static struct tee_shm_pool *
+optee_spci_config_shm_memremap(optee_invoke_fn *invoke_fn, u32 sec_caps,
+			       void **memremaped_shm)
+{
+	u_int idx;
+	phys_addr_t base = 0;
+	size_t sz = 0;
+
+	for (idx = 0;; idx++) {
+		u32 r = optee_spci_get_shm_config(invoke_fn, idx, &base, &sz);
+
+		if (!r)
+			break;
+		if (r != SPCI_NOT_PRESENT)
+			return ERR_PTR(-ENOENT);
+	}
+
+	return optee_shm_memremap(sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM,
+				  base, sz, memremaped_shm);
+}
+
+static struct optee *optee_probe_spci(struct device_node *np)
+{
+	optee_invoke_fn *invoke_fn;
+	struct tee_shm_pool *pool;
+	void *memremaped_shm;
+	u32 sec_caps;
+	u16 sp_handle;
+
+	invoke_fn = get_invoke_func(np);
+	if (IS_ERR(invoke_fn))
+		return (void *)invoke_fn;
+
+	if (!optee_spci_version_is_compatible(invoke_fn)) {
+		pr_warn("SPCI version mismatch\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!optee_spci_handle_open(invoke_fn, &sp_handle)) {
+		pr_warn("Failed to obtain SPCI handle\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!optee_spci_exchange_capabilities(invoke_fn, sp_handle,
+					      &sec_caps)) {
+		pr_warn("capabilities mismatch\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	pool = optee_spci_config_shm_memremap(invoke_fn, sec_caps,
+					      &memremaped_shm);
+	if (IS_ERR(pool))
+		return (void *)pool;
+
+	return optee_probe_final(invoke_fn, sec_caps, sp_handle, pool,
+				 memremaped_shm, &optee_spci_desc,
+				 &optee_spci_supp_desc);
+
+}
+
+static void optee_spci_handle_close(optee_invoke_fn *invoke_fn, u16 sp_handle)
+{
+	struct arm_smccc_res res;
+
+	invoke_fn(SPCI_HANDLE_CLOSE, (u32)sp_handle << 16, 0, 0, 0, 0, 0, 0,
+		  &res);
+	if (res.a0)
+		pr_info("SPCI_HANDLE_CLOSE: error %d\n", (int)res.a0);
+}
+
 static void optee_remove(struct optee *optee)
 {
 	/*
@@ -677,6 +988,12 @@ static void optee_remove(struct optee *optee)
 	 * into the old shared memory range.
 	 */
 	optee_disable_shm_cache(optee);
+
+	if (optee->spci.sp_handle != -1)
+		optee_spci_handle_close(optee->invoke_fn,
+					optee->spci.sp_handle);
+	mutex_destroy(&optee->spci.mutex);
+	idr_destroy(&optee->spci.idr);
 
 	/*
 	 * The two devices has to be unregistered before we can free the
@@ -700,6 +1017,11 @@ static const struct of_device_id optee_match[] = {
 	{},
 };
 
+static const struct of_device_id optee_spci_match[] = {
+	{ .compatible = "linaro,optee-spci" },
+	{},
+};
+
 static struct optee *optee_svc;
 
 static int __init optee_driver_init(void)
@@ -707,23 +1029,34 @@ static int __init optee_driver_init(void)
 	struct device_node *fw_np;
 	struct device_node *np;
 	struct optee *optee;
+	const char *driver_type;
 
 	/* Node is supposed to be below /firmware */
 	fw_np = of_find_node_by_name(NULL, "firmware");
 	if (!fw_np)
 		return -ENODEV;
 
+	driver_type = "legacy";
 	np = of_find_matching_node(fw_np, optee_match);
-	if (!np)
+	if (np) {
+		optee = optee_probe_legacy(np);
+		of_node_put(np);
+		goto out;
+	}
+
+	driver_type = "spci";
+	np = of_find_matching_node(fw_np, optee_spci_match);
+	if (np) {
+		optee = optee_probe_spci(np);
+		of_node_put(np);
+	} else {
 		return -ENODEV;
-
-	optee = optee_probe(np);
-	of_node_put(np);
-
+	}
+out:
 	if (IS_ERR(optee))
 		return PTR_ERR(optee);
 
-	pr_info("initialized driver\n");
+	pr_info("initialized %s driver\n", driver_type);
 
 	optee_svc = optee;
 
