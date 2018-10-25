@@ -30,9 +30,6 @@
 /* OP-TEE susbsystems ids */
 #define OPTEE_BENCH_KMOD	0x20000000
 
-#define OPTEE_MSG_RPC_CMD_BENCH_REG_NEW		0
-#define OPTEE_MSG_RPC_CMD_BENCH_REG_DEL		1
-
 /* storing timestamp */
 struct optee_time_st {
 	uint64_t cnt;	/* stores value from CNTPCT register */
