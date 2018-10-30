@@ -34,8 +34,6 @@ static void tee_shm_release(struct tee_shm *shm)
 
 	mutex_lock(&teedev->mutex);
 	idr_remove(&teedev->idr, shm->id);
-	if (shm->ctx)
-		list_del(&shm->link);
 	mutex_unlock(&teedev->mutex);
 
 	if (shm->flags & TEE_SHM_EXT_DMA_BUF) {
@@ -198,12 +196,8 @@ static struct tee_shm *__tee_shm_alloc(struct tee_context *ctx,
 		}
 	}
 
-	if (ctx) {
+	if (ctx)
 		teedev_ctx_get(ctx);
-		mutex_lock(&teedev->mutex);
-		list_add_tail(&shm->link, &ctx->list_shm);
-		mutex_unlock(&teedev->mutex);
-	}
 
 	return shm;
 err_rem:
@@ -330,10 +324,6 @@ struct tee_shm *tee_shm_register(struct tee_context *ctx, unsigned long addr,
 		}
 	}
 
-	mutex_lock(&teedev->mutex);
-	list_add_tail(&shm->link, &ctx->list_shm);
-	mutex_unlock(&teedev->mutex);
-
 	return shm;
 err:
 	if (shm) {
@@ -425,10 +415,6 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 		rc = ERR_PTR(-EINVAL);
 		goto err;
 	}
-
-	mutex_lock(&ref->shm.teedev->mutex);
-	list_add_tail(&ref->shm.link, &ctx->list_shm);
-	mutex_unlock(&ref->shm.teedev->mutex);
 
 	return &ref->shm;
 
