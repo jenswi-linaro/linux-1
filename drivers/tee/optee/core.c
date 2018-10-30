@@ -404,14 +404,11 @@ static bool optee_msg_exchange_capabilities(optee_invoke_fn *invoke_fn,
 	return true;
 }
 
-static struct tee_shm_pool *
-optee_config_shm_memremap(optee_invoke_fn *invoke_fn, void **memremaped_shm,
-			  u32 sec_caps)
+static struct tee_shm_pool *optee_shm_memremap(bool have_dyn_shm,
+					       phys_addr_t mem_start,
+					       size_t mem_size,
+					       void **memremaped_shm)
 {
-	union {
-		struct arm_smccc_res smccc;
-		struct optee_smc_get_shm_config_result result;
-	} res;
 	unsigned long vaddr;
 	phys_addr_t paddr;
 	size_t size;
@@ -422,19 +419,8 @@ optee_config_shm_memremap(optee_invoke_fn *invoke_fn, void **memremaped_shm,
 	struct tee_shm_pool_mgr *dmabuf_mgr;
 	void *rc;
 
-	invoke_fn(OPTEE_SMC_GET_SHM_CONFIG, 0, 0, 0, 0, 0, 0, 0, &res.smccc);
-	if (res.result.status != OPTEE_SMC_RETURN_OK) {
-		pr_info("shm service not available\n");
-		return ERR_PTR(-ENOENT);
-	}
-
-	if (res.result.settings != OPTEE_SMC_SHM_CACHED) {
-		pr_err("only normal cached shared memory supported\n");
-		return ERR_PTR(-EINVAL);
-	}
-
-	begin = roundup(res.result.start, PAGE_SIZE);
-	end = rounddown(res.result.start + res.result.size, PAGE_SIZE);
+	begin = roundup(mem_start, PAGE_SIZE);
+	end = rounddown(mem_start + mem_size, PAGE_SIZE);
 	paddr = begin;
 	size = end - begin;
 
@@ -454,7 +440,7 @@ optee_config_shm_memremap(optee_invoke_fn *invoke_fn, void **memremaped_shm,
 	 * If OP-TEE can work with unregistered SHM, we will use own pool
 	 * for private shm
 	 */
-	if (sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM) {
+	if (have_dyn_shm) {
 		rc = optee_shm_pool_alloc_pages();
 		if (IS_ERR(rc))
 			goto err_memunmap;
@@ -493,6 +479,32 @@ err_free_priv_mgr:
 err_memunmap:
 	memunmap(va);
 	return rc;
+}
+
+
+static struct tee_shm_pool *
+optee_config_shm_memremap(optee_invoke_fn *invoke_fn, void **memremaped_shm,
+			  u32 sec_caps)
+{
+	union {
+		struct arm_smccc_res smccc;
+		struct optee_smc_get_shm_config_result result;
+	} res;
+
+	invoke_fn(OPTEE_SMC_GET_SHM_CONFIG, 0, 0, 0, 0, 0, 0, 0, &res.smccc);
+	if (res.result.status != OPTEE_SMC_RETURN_OK) {
+		pr_info("shm service not available\n");
+		return ERR_PTR(-ENOENT);
+	}
+
+	if (res.result.settings != OPTEE_SMC_SHM_CACHED) {
+		pr_err("only normal cached shared memory supported\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	return optee_shm_memremap(sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM,
+				  res.result.start, res.result.size,
+				  memremaped_shm);
 }
 
 /* Simple wrapper functions to be able to use a function pointer */
@@ -534,15 +546,80 @@ static optee_invoke_fn *get_invoke_func(struct device_node *np)
 	return ERR_PTR(-EINVAL);
 }
 
+static struct optee *optee_probe_final(optee_invoke_fn *invoke_fn,
+				       u32 sec_caps, int sp_handle,
+				       struct tee_shm_pool *pool,
+				       void *memremaped_shm,
+				       const struct tee_desc *clnt_desc,
+				       const struct tee_desc *supp_desc)
+{
+	int rc;
+	struct tee_device *teedev;
+	struct optee *optee = kzalloc(sizeof(*optee), GFP_KERNEL);
+
+	if (!optee) {
+		rc = -ENOMEM;
+		goto err;
+	}
+
+	optee->invoke_fn = invoke_fn;
+	optee->sec_caps = sec_caps;
+
+	teedev = tee_device_alloc(clnt_desc, NULL, pool, optee);
+	if (IS_ERR(teedev)) {
+		rc = PTR_ERR(teedev);
+		goto err;
+	}
+	optee->teedev = teedev;
+
+	teedev = tee_device_alloc(supp_desc, NULL, pool, optee);
+	if (IS_ERR(teedev)) {
+		rc = PTR_ERR(teedev);
+		goto err;
+	}
+	optee->supp_teedev = teedev;
+
+	rc = tee_device_register(optee->teedev);
+	if (rc)
+		goto err;
+
+	rc = tee_device_register(optee->supp_teedev);
+	if (rc)
+		goto err;
+
+	mutex_init(&optee->call_queue.mutex);
+	INIT_LIST_HEAD(&optee->call_queue.waiters);
+	optee_wait_queue_init(&optee->wait_queue);
+	optee_supp_init(&optee->supp);
+	optee->memremaped_shm = memremaped_shm;
+	optee->pool = pool;
+
+	return optee;
+err:
+	if (optee) {
+		/*
+		 * tee_device_unregister() is safe to call even if the
+		 * devices hasn't been registered with
+		 * tee_device_register() yet.
+		 */
+		tee_device_unregister(optee->supp_teedev);
+		tee_device_unregister(optee->teedev);
+		kfree(optee);
+	}
+	if (pool)
+		tee_shm_pool_free(pool);
+	if (memremaped_shm)
+		memunmap(memremaped_shm);
+	return ERR_PTR(rc);
+}
+
 static struct optee *optee_probe(struct device_node *np)
 {
-	optee_invoke_fn *invoke_fn;
+	struct optee *optee;
 	struct tee_shm_pool *pool;
-	struct optee *optee = NULL;
+	optee_invoke_fn *invoke_fn;
 	void *memremaped_shm = NULL;
-	struct tee_device *teedev;
 	u32 sec_caps;
-	int rc;
 
 	invoke_fn = get_invoke_func(np);
 	if (IS_ERR(invoke_fn))
@@ -576,66 +653,16 @@ static struct optee *optee_probe(struct device_node *np)
 	if (IS_ERR(pool))
 		return (void *)pool;
 
-	optee = kzalloc(sizeof(*optee), GFP_KERNEL);
-	if (!optee) {
-		rc = -ENOMEM;
-		goto err;
+	optee = optee_probe_final(invoke_fn, sec_caps, -1, pool, memremaped_shm,
+				  &optee_desc, &optee_supp_desc);
+	if (!IS_ERR(optee)) {
+		optee_enable_shm_cache(optee);
+
+		if (optee->sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
+			pr_info("dynamic shared memory is enabled\n");
 	}
-
-	optee->invoke_fn = invoke_fn;
-	optee->sec_caps = sec_caps;
-
-	teedev = tee_device_alloc(&optee_desc, NULL, pool, optee);
-	if (IS_ERR(teedev)) {
-		rc = PTR_ERR(teedev);
-		goto err;
-	}
-	optee->teedev = teedev;
-
-	teedev = tee_device_alloc(&optee_supp_desc, NULL, pool, optee);
-	if (IS_ERR(teedev)) {
-		rc = PTR_ERR(teedev);
-		goto err;
-	}
-	optee->supp_teedev = teedev;
-
-	rc = tee_device_register(optee->teedev);
-	if (rc)
-		goto err;
-
-	rc = tee_device_register(optee->supp_teedev);
-	if (rc)
-		goto err;
-
-	mutex_init(&optee->call_queue.mutex);
-	INIT_LIST_HEAD(&optee->call_queue.waiters);
-	optee_wait_queue_init(&optee->wait_queue);
-	optee_supp_init(&optee->supp);
-	optee->memremaped_shm = memremaped_shm;
-	optee->pool = pool;
-
-	optee_enable_shm_cache(optee);
-
-	if (optee->sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
-		pr_info("dynamic shared memory is enabled\n");
 
 	return optee;
-err:
-	if (optee) {
-		/*
-		 * tee_device_unregister() is safe to call even if the
-		 * devices hasn't been registered with
-		 * tee_device_register() yet.
-		 */
-		tee_device_unregister(optee->supp_teedev);
-		tee_device_unregister(optee->teedev);
-		kfree(optee);
-	}
-	if (pool)
-		tee_shm_pool_free(pool);
-	if (memremaped_shm)
-		memunmap(memremaped_shm);
-	return ERR_PTR(rc);
 }
 
 static void optee_remove(struct optee *optee)
