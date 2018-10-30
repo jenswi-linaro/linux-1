@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016, Linaro Limited
+ * Copyright (c) 2015-2018, Linaro Limited
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -55,7 +55,9 @@ static void tee_shm_release(struct tee_shm *shm)
 			poolm = teedev->pool->private_mgr;
 
 		poolm->ops->free(poolm, shm);
-	} else if (shm->flags & TEE_SHM_REGISTER) {
+	}
+
+	if (shm->flags & TEE_SHM_REGISTER) {
 		size_t n;
 		int rc = teedev->desc->ops->shm_unregister(shm->ctx, shm);
 
@@ -140,10 +142,13 @@ struct tee_shm *tee_shm_alloc(struct tee_context *ctx, size_t size, u32 flags)
 		return ERR_PTR(-EINVAL);
 	}
 
-	if ((flags & ~(TEE_SHM_MAPPED | TEE_SHM_DMA_BUF))) {
+	if ((flags & ~(TEE_SHM_MAPPED|TEE_SHM_DMA_BUF|TEE_SHM_REGISTER))) {
 		dev_err(teedev->dev.parent, "invalid shm flags 0x%x", flags);
 		return ERR_PTR(-EINVAL);
 	}
+
+	if (teedev->desc->flags & TEE_DESC_ALWAYS_REGISTER_SHM)
+		flags |= TEE_SHM_REGISTER;
 
 	if (!tee_device_get(teedev))
 		return ERR_PTR(-EINVAL);
@@ -173,6 +178,19 @@ struct tee_shm *tee_shm_alloc(struct tee_context *ctx, size_t size, u32 flags)
 		goto err_kfree;
 	}
 
+	if (flags & TEE_SHM_REGISTER) {
+		if (!teedev->desc->ops->shm_register ||
+		    !teedev->desc->ops->shm_unregister ||
+		    !shm->paddr || !shm->kaddr || !shm->size) {
+			ret = ERR_PTR(-ENOTSUPP);
+			goto err_pool_free;
+		}
+		rc = teedev->desc->ops->shm_register(ctx, shm, NULL, 0, 0);
+		if (rc) {
+			ret = ERR_PTR(rc);
+			goto err_pool_free;
+		}
+	}
 
 	if (flags & TEE_SHM_DMA_BUF) {
 		DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
@@ -182,7 +200,7 @@ struct tee_shm *tee_shm_alloc(struct tee_context *ctx, size_t size, u32 flags)
 		mutex_unlock(&teedev->mutex);
 		if (shm->id < 0) {
 			ret = ERR_PTR(shm->id);
-			goto err_pool_free;
+			goto err_unregister;
 		}
 
 		exp_info.ops = &tee_shm_dma_buf_ops;
@@ -207,6 +225,8 @@ err_rem:
 		idr_remove(&teedev->idr, shm->id);
 		mutex_unlock(&teedev->mutex);
 	}
+err_unregister:
+	teedev->desc->ops->shm_unregister(ctx, shm);
 err_pool_free:
 	poolm->ops->free(poolm, shm);
 err_kfree:

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016, Linaro Limited
+ * Copyright (c) 2015-2018, Linaro Limited
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -120,6 +120,7 @@ struct tee_driver_ops {
  * @flags:	Extra properties of driver, defined by TEE_DESC_* below
  */
 #define TEE_DESC_PRIVILEGED	0x1
+#define TEE_DESC_ALWAYS_REGISTER_SHM 0x2
 struct tee_desc {
 	const char *name;
 	const struct tee_driver_ops *ops;
