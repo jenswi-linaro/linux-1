@@ -30,7 +30,7 @@ struct tee_shm_dmabuf_ref {
 
 static void tee_shm_release(struct tee_shm *shm)
 {
-	struct tee_device *teedev = shm->teedev;
+	struct tee_device *teedev = shm->ctx->teedev;
 
 	if (shm->flags & TEE_SHM_DMA_BUF) {
 		mutex_lock(&teedev->mutex);
@@ -69,8 +69,7 @@ static void tee_shm_release(struct tee_shm *shm)
 		kfree(shm->pages);
 	}
 
-	if (shm->ctx)
-		teedev_ctx_put(shm->ctx);
+	teedev_ctx_put(shm->ctx);
 
 	kfree(shm);
 	tee_device_put(teedev);
@@ -156,7 +155,6 @@ struct tee_shm *tee_shm_alloc(struct tee_context *ctx, size_t size, u32 flags)
 	}
 
 	shm->flags = flags | TEE_SHM_POOL;
-	shm->teedev = teedev;
 	shm->ctx = ctx;
 	if (flags & TEE_SHM_DMA_BUF)
 		poolm = teedev->pool->dma_buf_mgr;
@@ -245,7 +243,6 @@ struct tee_shm *tee_shm_register(struct tee_context *ctx, unsigned long addr,
 	}
 
 	shm->flags = flags | TEE_SHM_REGISTER;
-	shm->teedev = teedev;
 	shm->ctx = ctx;
 	shm->id = -1;
 	start = rounddown(addr, PAGE_SIZE);
@@ -325,6 +322,7 @@ EXPORT_SYMBOL_GPL(tee_shm_register);
 
 struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 {
+	struct tee_device *teedev = ctx->teedev;
 	struct tee_shm_dmabuf_ref *ref;
 	void *rc;
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
@@ -341,7 +339,6 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 	}
 
 	ref->shm.ctx = ctx;
-	ref->shm.teedev = ctx->teedev;
 	ref->shm.id = -1;
 
 	ref->dmabuf = dma_buf_get(fd);
@@ -350,7 +347,7 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 		goto err;
 	}
 
-	ref->attach = dma_buf_attach(ref->dmabuf, &ref->shm.teedev->dev);
+	ref->attach = dma_buf_attach(ref->dmabuf, &teedev->dev);
 	if (IS_ERR_OR_NULL(ref->attach)) {
 		rc = ERR_PTR(-EINVAL);
 		goto err;
@@ -371,10 +368,9 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 	ref->shm.size = sg_dma_len(ref->sgt->sgl);
 	ref->shm.flags = TEE_SHM_DMA_BUF | TEE_SHM_EXT_DMA_BUF;
 
-	mutex_lock(&ref->shm.teedev->mutex);
-	ref->shm.id = idr_alloc(&ref->shm.teedev->idr, &ref->shm,
-				1, 0, GFP_KERNEL);
-	mutex_unlock(&ref->shm.teedev->mutex);
+	mutex_lock(&teedev->mutex);
+	ref->shm.id = idr_alloc(&teedev->idr, &ref->shm, 1, 0, GFP_KERNEL);
+	mutex_unlock(&teedev->mutex);
 	if (ref->shm.id < 0) {
 		rc = ERR_PTR(ref->shm.id);
 		goto err;
@@ -397,9 +393,9 @@ struct tee_shm *tee_shm_register_fd(struct tee_context *ctx, int fd)
 err:
 	if (ref) {
 		if (ref->shm.id >= 0) {
-			mutex_lock(&ctx->teedev->mutex);
-			idr_remove(&ctx->teedev->idr, ref->shm.id);
-			mutex_unlock(&ctx->teedev->mutex);
+			mutex_lock(&teedev->mutex);
+			idr_remove(&teedev->idr, ref->shm.id);
+			mutex_unlock(&teedev->mutex);
 		}
 		if (ref->sgt)
 			dma_buf_unmap_attachment(ref->attach, ref->sgt,
@@ -411,7 +407,7 @@ err:
 	}
 	kfree(ref);
 	teedev_ctx_put(ctx);
-	tee_device_put(ctx->teedev);
+	tee_device_put(teedev);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(tee_shm_register_fd);
