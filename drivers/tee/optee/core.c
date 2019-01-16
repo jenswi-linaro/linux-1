@@ -22,6 +22,7 @@
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
+#include <linux/spci_protocol.h>
 #include <linux/string.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
@@ -29,10 +30,12 @@
 #include "optee_private.h"
 #include "optee_smc.h"
 #include "shm_pool.h"
-
 #define DRIVER_NAME "optee"
 
 #define OPTEE_SHM_NUM_PRIV_PAGES	CONFIG_OPTEE_SHM_NUM_PRIV_PAGES
+
+/* Structure to store a pointer to SPCI transport ops */
+static struct spci_ops *spci_ops;
 
 /**
  * optee_from_msg_param() - convert from OPTEE_MSG parameters to
@@ -529,6 +532,45 @@ static void optee_smccc_hvc(unsigned long a0, unsigned long a1,
 	arm_smccc_hvc(a0, a1, a2, a3, a4, a5, a6, a7, res);
 }
 
+static void optee_spci_msg(unsigned long a0, unsigned long a1,
+			      unsigned long a2, unsigned long a3,
+			      unsigned long a4, unsigned long a5,
+			      unsigned long a6, unsigned long a7,
+			      struct arm_smccc_res *res)
+{
+	int rc;
+	uint32_t out_len = sizeof(struct arm_smccc_res);
+	struct optee_msg {
+		uint64_t a0;    /* SMC function ID */
+		uint64_t a1;    /* Parameter */
+		uint64_t a2;    /* Parameter */
+		uint64_t a3;    /* Thread ID when returning from RPC */
+		uint64_t a4;    /* Not used */
+		uint64_t a5;    /* Not used */
+		uint64_t a6;    /* Not used */
+		uint64_t a7;    /* Hypervisor Client ID */
+	} msg = {
+		.a0 = a0,
+		.a1 = a1,
+		.a2 = a2,
+		.a3 = a3,
+		.a4 = a4,
+		.a5 = a5,
+		.a6 = a6,
+		.a7 = a7
+	};
+
+	rc = spci_ops->msg_send_recv((struct spci_msg_imp_def *) &msg,
+				     sizeof(struct optee_msg),
+				     (struct spci_msg_imp_def *) res,
+				     &out_len,
+				     0);
+	if (rc)
+		panic("OP-TEE invoke function error %d\n", rc);
+
+	return;
+}
+
 static optee_invoke_fn *get_invoke_func(struct device_node *np)
 {
 	const char *method;
@@ -544,6 +586,14 @@ static optee_invoke_fn *get_invoke_func(struct device_node *np)
 		return optee_smccc_hvc;
 	else if (!strcmp("smc", method))
 		return optee_smccc_smc;
+	else if (!strcmp("spci", method)) {
+		spci_ops = get_spci_ops();
+		if (spci_ops == NULL) {
+			pr_warn("failed \"method\" init: %s \n", method);
+			return ERR_PTR(-ENOENT);
+		}
+		return optee_spci_msg;
+	}
 
 	pr_warn("invalid \"method\" property: %s\n", method);
 	return ERR_PTR(-EINVAL);
