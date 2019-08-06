@@ -24,6 +24,7 @@
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
 
 struct wq_entry {
 	struct list_head link;
@@ -415,17 +416,9 @@ bad:
 }
 
 static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
-				struct tee_shm *shm,
+				struct optee_msg_arg *arg,
 				struct optee_call_ctx *call_ctx)
 {
-	struct optee_msg_arg *arg;
-
-	arg = tee_shm_get_va(shm, 0);
-	if (IS_ERR(arg)) {
-		pr_err("%s: tee_shm_get_va %p failed\n", __func__, shm);
-		return;
-	}
-
 	switch (arg->cmd) {
 	case OPTEE_RPC_CMD_GET_TIME:
 		handle_rpc_func_cmd_get_time(arg);
@@ -464,8 +457,9 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 {
 	struct tee_device *teedev = ctx->teedev;
 	struct optee *optee = tee_get_drvdata(teedev);
-	struct tee_shm *shm;
-	phys_addr_t pa;
+	struct optee_msg_arg *arg = NULL;
+	struct tee_shm *shm = NULL;
+	phys_addr_t pa = 0;
 
 	switch (OPTEE_SMC_RETURN_GET_RPC_FUNC(param->a0)) {
 	case OPTEE_SMC_RPC_FUNC_ALLOC:
@@ -495,7 +489,11 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 		break;
 	case OPTEE_SMC_RPC_FUNC_CMD:
 		shm = reg_pair_to_ptr(param->a1, param->a2);
-		handle_rpc_func_cmd(ctx, optee, shm, call_ctx);
+		arg = tee_shm_get_va(shm, 0);
+		if (IS_ERR(arg))
+			pr_err("%s: tee_shm_get_va %p failed\n", __func__, shm);
+		else
+			handle_rpc_func_cmd(ctx, optee, arg, call_ctx);
 		break;
 	default:
 		pr_warn("Unknown RPC func 0x%x\n",
@@ -504,4 +502,34 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 	}
 
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
+}
+
+void optee_spci_handle_rpc(struct tee_context *ctx,
+			   struct optee_spci_std_hdr *hdr,
+			   struct optee_call_ctx *call_ctx)
+{
+	struct tee_device *teedev = ctx->teedev;
+	struct optee *optee = tee_get_drvdata(teedev);
+	struct optee_msg_arg *arg = NULL;
+
+	switch (OPTEE_SMC_RETURN_GET_RPC_FUNC(hdr->a0)) {
+	case OPTEE_SMC_RPC_FUNC_FOREIGN_INTR:
+		/*
+		 * A foreign interrupt was raised while secure world was
+		 * executing, since they are handled in Linux a dummy RPC is
+		 * performed to let Linux take the interrupt through the normal
+		 * vector.
+		 */
+		break;
+	case OPTEE_SMC_RPC_FUNC_CMD:
+		arg =(struct optee_msg_arg *)(hdr + 1);
+		handle_rpc_func_cmd(ctx, optee, arg, call_ctx);
+		break;
+	default:
+		pr_warn("Unknown RPC func 0x%x\n",
+			(u32)OPTEE_SMC_RETURN_GET_RPC_FUNC(hdr->a0));
+		break;
+	}
+
+	hdr->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
 }

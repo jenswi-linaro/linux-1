@@ -15,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/errno.h>
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/tee_drv.h>
@@ -22,6 +23,7 @@
 #include <linux/uaccess.h>
 #include "optee_private.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
 #include "optee_bench.h"
 
 struct optee_call_waiter {
@@ -669,6 +671,365 @@ int optee_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
 }
 
 int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
+{
+	return 0;
+}
+
+static u32 optee_spci_do_call_with_arg(struct tee_context *ctx,
+				       struct optee_spci_std_hdr *hdr,
+				       size_t hlen)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct optee_msg_arg *msg_arg = (void *)(hdr + 1);
+	struct optee_spci_std_hdr *out_hdr = NULL;
+	struct optee_call_ctx call_ctx = { };
+	struct optee_call_waiter w = { };
+	size_t ilen = 0;
+	size_t olen = 0;
+	u32 ret = 0;
+	int rc;
+
+	ilen = sizeof(*hdr) + OPTEE_MSG_GET_ARG_SIZE(msg_arg->num_params);
+
+	out_hdr = kzalloc(hlen, GFP_KERNEL);
+	if (!out_hdr)
+		return -1;
+
+	/* Initialize waiter */
+	optee_cq_wait_init(&optee->call_queue, &w);
+	while (true) {
+		optee_bm_timestamp();
+
+		olen = hlen;
+		rc = optee_spci_msg(hdr, ilen, out_hdr, &olen);
+
+		optee_bm_timestamp();
+
+		if (rc) {
+			ret = OPTEE_SMC_RETURN_ENOTAVAIL;
+			break;
+		} else if (out_hdr->a0 == OPTEE_SMC_RETURN_ETHREAD_LIMIT) {
+			/*
+			 * Out of threads in secure world, wait for a thread
+			 * become available.
+			 */
+			optee_cq_wait_for_completion(&optee->call_queue, &w);
+		} else if (OPTEE_SMC_RETURN_IS_RPC(out_hdr->a0)) {
+			optee_spci_handle_rpc(ctx, out_hdr, &call_ctx);
+			ilen = olen;
+			memcpy(hdr, out_hdr, olen);
+			memset(out_hdr, 0, hlen);
+		} else {
+			memcpy(hdr, out_hdr, olen);
+			ret = out_hdr->a0;
+			break;
+		}
+	}
+
+	kfree(out_hdr);
+
+	optee_rpc_finalize_call(&call_ctx);
+	/*
+	 * We're done with our thread in secure world, if there's any
+	 * thread waiters wake up one.
+	 */
+	optee_cq_wait_final(&optee->call_queue, &w);
+
+	return ret;
+}
+
+static struct optee_msg_arg *get_spci_msg_arg(struct tee_context *ctx,
+					      unsigned int num_params,
+					      struct optee_spci_std_hdr **hdr,
+					      size_t *hlen)
+{
+	size_t l = sizeof(*hdr) + OPTEE_MSG_GET_ARG_SIZE(max(num_params, 4U));
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *h = NULL;
+
+	h = kzalloc(l, GFP_KERNEL);
+	if (!h)
+		return NULL;
+
+	h->a0 = OPTEE_SMC_CALL_WITH_ARG;
+	msg_arg = (struct optee_msg_arg *)(h + 1);
+	msg_arg->num_params = num_params;
+	*hdr = h;
+	*hlen = l;
+
+	return msg_arg;
+}
+
+int optee_spci_open_session(struct tee_context *ctx,
+			    struct tee_ioctl_open_session_arg *arg,
+			    struct tee_param *param)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct optee_spci_std_hdr *hdr = NULL;
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_session *sess = NULL;
+	size_t hlen = 0;
+	int rc = 0;
+
+	/* +2 for the meta parameters added below */
+	msg_arg = get_spci_msg_arg(ctx, arg->num_params + 2, &hdr, &hlen);
+	if (!msg_arg)
+		return -ENOMEM;
+
+	msg_arg->cmd = OPTEE_MSG_CMD_OPEN_SESSION;
+	msg_arg->cancel_id = arg->cancel_id;
+
+	/*
+	 * Initialize and add the meta parameters needed when opening a
+	 * session.
+	 */
+	msg_arg->params[0].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
+				  OPTEE_MSG_ATTR_META;
+	msg_arg->params[1].attr = OPTEE_MSG_ATTR_TYPE_VALUE_INPUT |
+				  OPTEE_MSG_ATTR_META;
+	memcpy(&msg_arg->params[0].u.value, arg->uuid, sizeof(arg->uuid));
+	memcpy(&msg_arg->params[1].u.value, arg->uuid, sizeof(arg->clnt_uuid));
+	msg_arg->params[1].u.value.c = arg->clnt_login;
+
+	rc = optee_to_msg_param(msg_arg->params + 2, arg->num_params, param);
+	if (rc)
+		goto out;
+
+	sess = kzalloc(sizeof(*sess), GFP_KERNEL);
+	if (!sess) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	if (optee_spci_do_call_with_arg(ctx, hdr, hlen)) {
+		msg_arg->ret = TEEC_ERROR_COMMUNICATION;
+		msg_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	if (msg_arg->ret == TEEC_SUCCESS) {
+		/* A new session has been created, add it to the list. */
+		sess->session_id = msg_arg->session;
+		mutex_lock(&ctxdata->mutex);
+		list_add(&sess->list_node, &ctxdata->sess_list);
+		mutex_unlock(&ctxdata->mutex);
+	} else {
+		kfree(sess);
+	}
+
+	if (optee_from_msg_param(param, arg->num_params, msg_arg->params + 2)) {
+		arg->ret = TEEC_ERROR_COMMUNICATION;
+		arg->ret_origin = TEEC_ORIGIN_COMMS;
+		/* Close session again to avoid leakage */
+		optee_spci_close_session(ctx, msg_arg->session);
+	} else {
+		arg->session = msg_arg->session;
+		arg->ret = msg_arg->ret;
+		arg->ret_origin = msg_arg->ret_origin;
+	}
+out:
+	kfree(hdr);
+
+	return rc;
+}
+
+int optee_spci_close_session_helper(struct tee_context *ctx, u32 session)
+{
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *hdr = NULL;
+	size_t hlen = 0;
+
+	msg_arg = get_spci_msg_arg(ctx, 0, &hdr, &hlen);
+	if (!msg_arg)
+		return -ENOMEM;
+
+	msg_arg->cmd = OPTEE_MSG_CMD_CLOSE_SESSION;
+	msg_arg->session = session;
+	optee_spci_do_call_with_arg(ctx, hdr, hlen);
+	kfree(hdr);
+
+	return 0;
+}
+
+int optee_spci_close_session(struct tee_context *ctx, u32 session)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct optee_session *sess;
+
+	/* Check that the session is valid and remove it from the list */
+	mutex_lock(&ctxdata->mutex);
+	sess = find_session(ctxdata, session);
+	if (sess)
+		list_del(&sess->list_node);
+	mutex_unlock(&ctxdata->mutex);
+	if (!sess)
+		return -EINVAL;
+	kfree(sess);
+
+	return optee_spci_close_session_helper(ctx, session);
+}
+
+int optee_spci_invoke_func(struct tee_context *ctx,
+			   struct tee_ioctl_invoke_arg *arg,
+			   struct tee_param *param)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *hdr = NULL;
+	struct optee_session *sess = NULL;
+	size_t hlen = 0;
+	int rc = 0;
+
+	/* Check that the session is valid */
+	mutex_lock(&ctxdata->mutex);
+	sess = find_session(ctxdata, arg->session);
+	mutex_unlock(&ctxdata->mutex);
+	if (!sess)
+		return -EINVAL;
+
+	msg_arg = get_spci_msg_arg(ctx, arg->num_params, &hdr, &hlen);
+	if (!msg_arg)
+		return -ENOMEM;
+	msg_arg->cmd = OPTEE_MSG_CMD_INVOKE_COMMAND;
+	msg_arg->func = arg->func;
+	msg_arg->session = arg->session;
+	msg_arg->cancel_id = arg->cancel_id;
+
+	rc = optee_to_msg_param(msg_arg->params, arg->num_params, param);
+	if (rc)
+		goto out;
+
+	if (optee_spci_do_call_with_arg(ctx, hdr, hlen)) {
+		msg_arg->ret = TEEC_ERROR_COMMUNICATION;
+		msg_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	if (optee_from_msg_param(param, arg->num_params, msg_arg->params)) {
+		msg_arg->ret = TEEC_ERROR_COMMUNICATION;
+		msg_arg->ret_origin = TEEC_ORIGIN_COMMS;
+	}
+
+	arg->ret = msg_arg->ret;
+	arg->ret_origin = msg_arg->ret_origin;
+out:
+	kfree(hdr);
+	return rc;
+}
+
+int optee_spci_cancel_req(struct tee_context *ctx, u32 cancel_id, u32 session)
+{
+	struct optee_context_data *ctxdata = ctx->data;
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *hdr = NULL;
+	struct optee_session *sess = NULL;
+	size_t hlen = 0;
+
+	/* Check that the session is valid */
+	mutex_lock(&ctxdata->mutex);
+	sess = find_session(ctxdata, session);
+	mutex_unlock(&ctxdata->mutex);
+	if (!sess)
+		return -EINVAL;
+
+	msg_arg = get_spci_msg_arg(ctx, 0, &hdr, &hlen);
+	if (!msg_arg)
+		return -ENOMEM;
+
+	msg_arg->cmd = OPTEE_MSG_CMD_CANCEL;
+	msg_arg->session = session;
+	msg_arg->cancel_id = cancel_id;
+	optee_spci_do_call_with_arg(ctx, hdr, hlen);
+
+	kfree(hdr);
+	return 0;
+}
+
+int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			    struct page **pages, size_t num_pages,
+			    unsigned long start)
+{
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *hdr = NULL;
+	u64 *pages_list = NULL;
+	size_t hlen = 0;
+	int rc = 0;
+
+	if (!num_pages)
+		return -EINVAL;
+
+	rc = check_mem_type(start, num_pages);
+	if (rc)
+		return rc;
+
+	pages_list = optee_allocate_pages_list(num_pages);
+	if (!pages_list)
+		return -ENOMEM;
+
+	msg_arg = get_spci_msg_arg(ctx, 1, &hdr, &hlen);
+	if (!msg_arg) {
+		rc = -ENOMEM;
+		goto out;
+	}
+
+	optee_fill_pages_list(pages_list, pages, num_pages,
+			      tee_shm_get_page_offset(shm));
+
+	msg_arg->cmd = OPTEE_MSG_CMD_REGISTER_SHM;
+	msg_arg->params->attr = OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT |
+				OPTEE_MSG_ATTR_NONCONTIG;
+	msg_arg->params->u.tmem.shm_ref = (unsigned long)shm;
+	msg_arg->params->u.tmem.size = tee_shm_get_size(shm);
+	/*
+	 * In the least bits of msg_arg->params->u.tmem.buf_ptr we
+	 * store buffer offset from 4k page, as described in OP-TEE ABI.
+	 */
+	msg_arg->params->u.tmem.buf_ptr = virt_to_phys(pages_list) |
+	  (tee_shm_get_page_offset(shm) & (OPTEE_MSG_NONCONTIG_PAGE_SIZE - 1));
+
+	if (optee_spci_do_call_with_arg(ctx, hdr, hlen) ||
+	    msg_arg->ret != TEEC_SUCCESS)
+		rc = -EINVAL;
+
+	kfree(hdr);
+out:
+	optee_free_pages_list(pages_list, num_pages);
+	return rc;
+}
+
+int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct optee_msg_arg *msg_arg = NULL;
+	struct optee_spci_std_hdr *hdr = NULL;
+	size_t hlen = 0;
+	int rc = 0;
+
+	msg_arg = get_spci_msg_arg(ctx, 1, &hdr, &hlen);
+	if (!msg_arg)
+		return -ENOMEM;
+
+	msg_arg->cmd = OPTEE_MSG_CMD_UNREGISTER_SHM;
+	msg_arg->params[0].attr = OPTEE_MSG_ATTR_TYPE_RMEM_INPUT;
+	msg_arg->params[0].u.rmem.shm_ref = (unsigned long)shm;
+
+	if (optee_spci_do_call_with_arg(ctx, hdr, hlen) ||
+	    msg_arg->ret != TEEC_SUCCESS)
+		rc = -EINVAL;
+
+	kfree(hdr);
+	return rc;
+}
+
+int optee_spci_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
+				 struct page **pages, size_t num_pages,
+				 unsigned long start)
+{
+	/*
+	 * We don't want to register supplicant memory in OP-TEE.
+	 * Instead information about it will be passed in RPC code.
+	 */
+	return check_mem_type(start, num_pages);
+}
+
+int optee_spci_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 {
 	return 0;
 }

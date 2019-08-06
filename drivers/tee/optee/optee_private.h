@@ -20,6 +20,7 @@
 #include <linux/tee_drv.h>
 #include <linux/types.h>
 #include "optee_msg.h"
+#include "optee_spci.h"
 
 #define OPTEE_MAX_ARG_SIZE	1024
 
@@ -181,6 +182,29 @@ u64 *optee_allocate_pages_list(size_t num_entries);
 void optee_free_pages_list(void *array, size_t num_entries);
 void optee_fill_pages_list(u64 *dst, struct page **pages, int num_pages,
 			   size_t page_offset);
+
+int optee_spci_msg(const void *in, size_t ilen, void *out, size_t *olen);
+void optee_spci_handle_rpc(struct tee_context *ctx,
+			   struct optee_spci_std_hdr *hdr,
+			   struct optee_call_ctx *call_ctx);
+int optee_spci_open_session(struct tee_context *ctx,
+			    struct tee_ioctl_open_session_arg *arg,
+			    struct tee_param *param);
+int optee_spci_close_session_helper(struct tee_context *ctx, u32 session);
+int optee_spci_close_session(struct tee_context *ctx, u32 session);
+int optee_spci_invoke_func(struct tee_context *ctx,
+			   struct tee_ioctl_invoke_arg *arg,
+			   struct tee_param *param);
+int optee_spci_cancel_req(struct tee_context *ctx, u32 cancel_id, u32 session);
+int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			    struct page **pages, size_t num_pages,
+			    unsigned long start);
+int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm);
+int optee_spci_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
+				 struct page **pages, size_t num_pages,
+				 unsigned long start);
+int optee_spci_shm_unregister_supp(struct tee_context *ctx,
+				   struct tee_shm *shm);
 
 int optee_enumerate_devices(void);
 

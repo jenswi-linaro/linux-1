@@ -26,6 +26,7 @@
 #include <linux/tee_drv.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/spci_protocol.h>
 #include "optee_bench.h"
 #include "optee_private.h"
 #include "optee_smc.h"
@@ -34,6 +35,9 @@
 #define DRIVER_NAME "optee"
 
 #define OPTEE_SHM_NUM_PRIV_PAGES	CONFIG_OPTEE_SHM_NUM_PRIV_PAGES
+
+/* Structure to store a pointer to SPCI transport ops */
+static struct spci_ops *spci_ops;
 
 /**
  * optee_from_msg_param() - convert from OPTEE_MSG parameters to
@@ -294,6 +298,19 @@ static void optee_release_supp(struct tee_context *ctx)
 	optee_supp_release(&optee->supp);
 }
 
+static void optee_spci_release(struct tee_context *ctx)
+{
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+}
+
+static void optee_spci_release_supp(struct tee_context *ctx)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+	optee_supp_release(&optee->supp);
+}
+
 static const struct tee_driver_ops optee_ops = {
 	.get_version = optee_get_version,
 	.open = optee_open,
@@ -307,7 +324,7 @@ static const struct tee_driver_ops optee_ops = {
 };
 
 static const struct tee_desc optee_desc = {
-	.name = DRIVER_NAME "-clnt",
+	.name = DRIVER_NAME "-legacy-clnt",
 	.ops = &optee_ops,
 	.owner = THIS_MODULE,
 };
@@ -323,8 +340,43 @@ static const struct tee_driver_ops optee_supp_ops = {
 };
 
 static const struct tee_desc optee_supp_desc = {
-	.name = DRIVER_NAME "-supp",
+	.name = DRIVER_NAME "-legacy-supp",
 	.ops = &optee_supp_ops,
+	.owner = THIS_MODULE,
+	.flags = TEE_DESC_PRIVILEGED,
+};
+
+static const struct tee_driver_ops optee_spci_ops = {
+	.get_version = optee_get_version,
+	.open = optee_open,
+	.release = optee_spci_release,
+	.open_session = optee_spci_open_session,
+	.close_session = optee_spci_close_session,
+	.invoke_func = optee_spci_invoke_func,
+	.cancel_req = optee_spci_cancel_req,
+	.shm_register = optee_spci_shm_register,
+	.shm_unregister = optee_spci_shm_unregister,
+};
+
+static const struct tee_desc optee_spci_desc = {
+	.name = DRIVER_NAME "-spci-clnt",
+	.ops = &optee_spci_ops,
+	.owner = THIS_MODULE,
+};
+
+static const struct tee_driver_ops optee_spci_supp_ops = {
+	.get_version = optee_get_version,
+	.open = optee_open,
+	.release = optee_spci_release_supp,
+	.supp_recv = optee_supp_recv,
+	.supp_send = optee_supp_send,
+	.shm_register = optee_spci_shm_register_supp,
+	.shm_unregister = optee_spci_shm_unregister_supp,
+};
+
+static const struct tee_desc optee_spci_supp_desc = {
+	.name = DRIVER_NAME "-spci-supp",
+	.ops = &optee_spci_supp_ops,
 	.owner = THIS_MODULE,
 	.flags = TEE_DESC_PRIVILEGED,
 };
@@ -613,7 +665,7 @@ err:
 	return ERR_PTR(rc);
 }
 
-static struct optee *optee_probe(struct device_node *np)
+static struct optee *optee_probe_legacy(struct device_node *np)
 {
 	struct optee *optee;
 	struct tee_shm_pool *pool;
@@ -665,6 +717,77 @@ static struct optee *optee_probe(struct device_node *np)
 	return optee;
 }
 
+
+int optee_spci_msg(const void *in, size_t ilen, void *out, size_t *olen)
+{
+	u32 ol = *olen;
+	int rc = -1;
+
+	rc = spci_ops->msg_send_recv((void *)in, ilen, out, &ol, 0);
+	*olen = ol;
+	return rc;
+}
+
+static void fast_call_via_spci(unsigned long a0, unsigned long a1,
+			       unsigned long a2, unsigned long a3,
+			       unsigned long a4, unsigned long a5,
+			       unsigned long a6, unsigned long a7,
+			       struct arm_smccc_res *res)
+{
+	size_t rlen = sizeof(*res);
+	u64 msg[] = { a0, a1, a2, a3, a4, a5, a6, a7, };
+	int rc = optee_spci_msg(msg, sizeof(msg), res, &rlen);
+
+	if (rc)
+		panic("OP-TEE invoke function error %d\n", rc);
+}
+
+static struct optee *optee_probe_spci(struct device_node *np)
+{
+	optee_invoke_fn *invoke_fn = fast_call_via_spci;
+	struct tee_shm_pool *pool = NULL;
+	void *memremaped_shm = NULL;
+	struct optee *optee = NULL;
+	u32 sec_caps = 0;
+
+	spci_ops = get_spci_ops();
+	if (!spci_ops)
+		return ERR_PTR(-ENOENT);
+
+	if (!optee_msg_api_uid_is_optee_api(invoke_fn)) {
+		pr_warn("api uid mismatch\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	optee_msg_get_os_revision(invoke_fn);
+
+	if (!optee_msg_api_revision_is_compatible(invoke_fn)) {
+		pr_warn("api revision mismatch\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (!optee_msg_exchange_capabilities(invoke_fn, &sec_caps)) {
+		pr_warn("capabilities mismatch\n");
+		return ERR_PTR(-EINVAL);
+	}
+
+	if (sec_caps & OPTEE_SMC_SEC_CAP_HAVE_RESERVED_SHM) {
+		pool = optee_config_shm_memremap(invoke_fn, &memremaped_shm,
+						 sec_caps);
+		if (IS_ERR(pool))
+			return (void *)pool;
+	}
+
+	optee = optee_probe_final(invoke_fn, sec_caps, -1, pool, memremaped_shm,
+				  &optee_spci_desc, &optee_spci_supp_desc);
+	if (!IS_ERR(optee)) {
+		if (optee->sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
+			pr_info("dynamic shared memory is enabled\n");
+	}
+
+	return optee;
+}
+
 static void optee_remove(struct optee *optee)
 {
 	/*
@@ -696,11 +819,17 @@ static const struct of_device_id optee_match[] = {
 	{},
 };
 
+static const struct of_device_id optee_spci_match[] = {
+	{ .compatible = "linaro,optee-spci" },
+	{},
+};
+
 static struct optee *optee_svc;
 
 static int __init optee_driver_init(void)
 {
 	struct device_node *fw_np = NULL;
+	const char *driver_type = "legacy";
 	struct device_node *np = NULL;
 	struct optee *optee = NULL;
 	int rc = 0;
@@ -711,14 +840,24 @@ static int __init optee_driver_init(void)
 		return -ENODEV;
 
 	np = of_find_matching_node(fw_np, optee_match);
-	if (!np || !of_device_is_available(np)) {
+	if (np && of_device_is_available(np)) {
+		optee = optee_probe_legacy(np);
 		of_node_put(np);
-		return -ENODEV;
+		goto out;
 	}
-
-	optee = optee_probe(np);
 	of_node_put(np);
 
+	driver_type = "spci";
+	np = of_find_matching_node(fw_np, optee_spci_match);
+	if (np && of_device_is_available(np)) {
+		optee = optee_probe_spci(np);
+		of_node_put(np);
+		goto out;
+	}
+	of_node_put(np);
+	return -ENODEV;
+
+out:
 	if (IS_ERR(optee))
 		return PTR_ERR(optee);
 
@@ -728,7 +867,7 @@ static int __init optee_driver_init(void)
 		return rc;
 	}
 
-	pr_info("initialized driver\n");
+	pr_info("initialized %s driver\n", driver_type);
 
 	optee_svc = optee;
 
