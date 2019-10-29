@@ -77,6 +77,17 @@ config ARM_SDE_INTERFACE
 	  standard for registering callbacks from the platform firmware
 	  into the OS. This is typically used to implement RAS notifications.
 
+config ARM_SPCI_TRANSPORT
+	bool "ARM Secure Partition Client Interface (SPCI)"
+	depends on ARM64
+	help
+	  The Secure Partition Client Interface (SPCI) is an Arm standard for
+	  communication and memory sharing between entities managed by SMCCC
+	  compliant firmware.
+
+	  This driver provides interface for all the client drivers making
+	  use of the features offered by SPCI.
+
 config EDD
 	tristate "BIOS Enhanced Disk Drive calls determine boot disk"
 	depends on X86
