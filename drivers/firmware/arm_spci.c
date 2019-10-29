@@ -1,0 +1,141 @@
+// SPDX-License-Identifier: GPL-2.0-only
+/*
+ * Secure Partitions Communication Interface (SPCI) Protocol driver
+ *
+ * SPCI is a system message passing and memory sharing protocol allowing for
+ * execution contexts to exchange information with other execution contexts
+ * residing on other Secure Partitions or Virtual Machines managed by any SPCI
+ * compliant firmware framework.
+ *
+ * Copyright (C) 2019 Arm Ltd.
+ */
+
+#include <linux/platform_device.h>
+#include <linux/arm_spci.h>
+#include <linux/arm-smcccv1_2.h>
+#include <linux/of_address.h>
+#include <linux/of_platform.h>
+#include <linux/module.h>
+
+static spci_sp_id_t vm_id;
+
+struct arm_smcccv1_2_return
+arm_spci_smccc(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4, u64 arg5,
+	       u64 arg6, u64 arg7)
+{
+	struct arm_smcccv1_2_return hvc_return;
+
+	__arm_smcccv1_2_hvc(func, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
+			    &hvc_return);
+
+	return hvc_return;
+}
+
+static u32 sender_receiver_pack(u32 src_id, u32 dst_id)
+{
+	return (((src_id << 16) & 0xffff0000) | (dst_id & 0xffff));
+}
+
+int spci_msg_send(spci_sp_id_t dst_id, u32 len, u32 attributes)
+{
+	struct arm_smcccv1_2_return msg_send_return;
+
+	/* w1[32:16] Sender endpoint ID, w1[15:0] destination endpoint id. */
+	u32 sender_receiver = sender_receiver_pack(vm_id, dst_id);
+
+	msg_send_return = arm_spci_smccc(SPCI_MSG_SEND_32, sender_receiver,
+					 0, len, attributes, 0, 0, 0);
+
+	if (msg_send_return.func  == SPCI_ERROR_32) {
+		switch (msg_send_return.arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+		case SPCI_BUSY:
+			return -EAGAIN;
+		default:
+			panic("%s: Unhandled return code (%lld)\n", __func__,
+			      msg_send_return.arg2);
+		}
+	}
+	return 0;
+}
+
+struct arm_smcccv1_2_return
+spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
+			 u64 w6, u64 w7)
+{
+	struct arm_smcccv1_2_return ret;
+
+	/* w1[32:16] Sender endpoint ID, w1[15:0] destination endpoint id. */
+	u32 sender_receiver = sender_receiver_pack(vm_id, dst_id);
+
+	ret = arm_spci_smccc(SPCI_MSG_SEND_DIRECT_REQ_32, sender_receiver, 0,
+			     w3, w4, w5, w6, w7);
+
+	if (ret.func == SPCI_ERROR_32) {
+		pr_err("%s: Error sending message %llu\n", __func__, ret.func);
+		switch (ret.arg1) {
+		case SPCI_INVALID_PARAMETERS:
+			ret.func = -ENXIO;
+			break;
+		case SPCI_DENIED:
+		case SPCI_NOT_SUPPORTED:
+			ret.func = -EIO;
+			break;
+		case SPCI_BUSY:
+			ret.func = -EAGAIN;
+			break;
+		}
+	} else {
+		ret.func = 0;
+	}
+
+	return ret;
+}
+
+static spci_sp_id_t spci_id_get(void)
+{
+	struct  arm_smcccv1_2_return id_get_return =
+		arm_spci_smccc(SPCI_ID_GET_32, 0, 0, 0, 0, 0, 0, 0);
+
+	if (id_get_return.func == SPCI_ERROR_32)
+		panic("%s: failed to obtain vm id\n", __func__);
+	else
+		return id_get_return.arg2 & 0xffff;
+}
+
+static struct spci_ops spci_ops = {
+	.async_msg_send = spci_msg_send,
+	.sync_msg_send = spci_msg_send_direct_req,
+};
+
+struct spci_ops *get_spci_ops(void)
+{
+	return &spci_ops;
+}
+EXPORT_SYMBOL_GPL(get_spci_ops);
+
+static const struct of_device_id spci_of_match[] = {
+	{.compatible = "arm,spci"},
+	{},
+};
+
+static int spci_probe(struct platform_device *pdev)
+{
+	vm_id = spci_id_get();
+	return 0;
+}
+
+static struct platform_driver spci_driver = {
+	.driver = {
+		.name = "spci_protocol",
+		.of_match_table = spci_of_match,
+	},
+	.probe = spci_probe,
+};
+module_platform_driver(spci_driver);
+
+MODULE_AUTHOR("Arm");
+MODULE_DESCRIPTION("Arm SPCI transport driver");
+MODULE_LICENSE("GPL v2");
