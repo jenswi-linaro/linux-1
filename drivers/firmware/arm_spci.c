@@ -19,17 +19,26 @@
 
 static spci_sp_id_t vm_id;
 
-struct arm_smcccv1_2_return
-arm_spci_smccc(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4, u64 arg5,
-	       u64 arg6, u64 arg7)
-{
-	struct arm_smcccv1_2_return hvc_return;
+static struct arm_smcccv1_2_return
+(*arm_spci_smccc)(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,
+		  u64 arg5, u64 arg6, u64 arg7);
 
-	__arm_smcccv1_2_hvc(func, arg1, arg2, arg3, arg4, arg5, arg6, arg7,
-			    &hvc_return);
-
-	return hvc_return;
+#define SPCI_DEFINE_CALL(conduit)					\
+static struct arm_smcccv1_2_return					\
+arm_spci_##conduit(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,	\
+		   u64 arg5, u64 arg6, u64 arg7)			\
+{									\
+	struct arm_smcccv1_2_return smccc_ret;				\
+									\
+	__arm_smcccv1_2_##conduit(func, arg1, arg2, arg3, arg4, arg5,	\
+				  arg6,	arg7, &smccc_ret);		\
+									\
+	return smccc_ret;						\
 }
+
+SPCI_DEFINE_CALL(smc)
+
+SPCI_DEFINE_CALL(hvc)
 
 static u32 sender_receiver_pack(u32 src_id, u32 dst_id)
 {
@@ -116,6 +125,27 @@ struct spci_ops *get_spci_ops(void)
 }
 EXPORT_SYMBOL_GPL(get_spci_ops);
 
+static int spci_dt_init(struct device_node *np)
+{
+	const char *conduit;
+
+	pr_info("SPCI: obtaining conduit from DT.\n");
+
+	if (of_property_read_string(np, "conduit", &conduit)) {
+		pr_warn("SPCI: cannot find conduit in DT\n");
+		return -ENXIO;
+	}
+
+	if (!strcmp("smc", conduit))
+		arm_spci_smccc = arm_spci_smc;
+	else if (!strcmp("hvc", conduit))
+		arm_spci_smccc = arm_spci_hvc;
+	else
+		panic("%s: unrecognized SPCI conduit\n", __func__);
+
+	return 0;
+}
+
 static const struct of_device_id spci_of_match[] = {
 	{.compatible = "arm,spci"},
 	{},
@@ -123,7 +153,11 @@ static const struct of_device_id spci_of_match[] = {
 
 static int spci_probe(struct platform_device *pdev)
 {
+	spci_dt_init(pdev->dev.of_node);
+
+	/* Initialize VM ID. */
 	vm_id = spci_id_get();
+
 	return 0;
 }
 
