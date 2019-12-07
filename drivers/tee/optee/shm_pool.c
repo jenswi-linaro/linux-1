@@ -87,3 +87,53 @@ struct tee_shm_pool_mgr *optee_shm_pool_alloc_pages(void)
 
 	return mgr;
 }
+
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static int pool_ffa_op_alloc(struct tee_shm_pool_mgr *poolm,
+			 struct tee_shm *shm, size_t size)
+{
+	unsigned int order = get_order(size);
+	struct page *page;
+	int rc = 0;
+
+	page = alloc_pages(GFP_KERNEL | __GFP_ZERO, order);
+	if (!page)
+		return -ENOMEM;
+
+	shm->kaddr = page_address(page);
+	shm->paddr = page_to_phys(page);
+	shm->size = PAGE_SIZE << order;
+
+	shm->flags |= TEE_SHM_REGISTER;
+	rc = optee_ffa_shm_register(shm->ctx, shm, &page, 1 << order,
+				     (unsigned long)shm->kaddr);
+
+	return rc;
+}
+
+static void pool_ffa_op_free(struct tee_shm_pool_mgr *poolm,
+			 struct tee_shm *shm)
+{
+	optee_ffa_shm_unregister(shm->ctx, shm);
+	free_pages((unsigned long)shm->kaddr, get_order(shm->size));
+	shm->kaddr = NULL;
+}
+
+static const struct tee_shm_pool_mgr_ops pool_ffa_ops = {
+	.alloc = pool_ffa_op_alloc,
+	.free = pool_ffa_op_free,
+	.destroy_poolmgr = pool_op_destroy_poolmgr,
+};
+
+struct tee_shm_pool_mgr *optee_ffa_shm_pool_alloc_pages(void)
+{
+	struct tee_shm_pool_mgr *mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+
+	if (!mgr)
+		return ERR_PTR(-ENOMEM);
+
+	mgr->ops = &pool_ffa_ops;
+
+	return mgr;
+}
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/

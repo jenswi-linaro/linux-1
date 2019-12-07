@@ -14,6 +14,7 @@
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
 #include "optee_smc.h"
+#include "optee_ffa.h"
 
 struct wq_entry {
 	struct list_head link;
@@ -56,6 +57,7 @@ bad:
 static void handle_rpc_func_cmd_i2c_transfer(struct tee_context *ctx,
 					     struct optee_msg_arg *arg)
 {
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct i2c_client client = { 0 };
 	struct tee_param *params;
 	size_t i;
@@ -79,7 +81,8 @@ static void handle_rpc_func_cmd_i2c_transfer(struct tee_context *ctx,
 		return;
 	}
 
-	if (optee_from_msg_param(params, arg->num_params, arg->params))
+	if (optee->ops->from_msg_param(optee, params, arg->num_params,
+				       arg->params))
 		goto bad;
 
 	for (i = 0; i < arg->num_params; i++) {
@@ -122,7 +125,8 @@ static void handle_rpc_func_cmd_i2c_transfer(struct tee_context *ctx,
 		arg->ret = TEEC_ERROR_COMMUNICATION;
 	} else {
 		params[3].u.value.a = ret;
-		if (optee_to_msg_param(arg->params, arg->num_params, params))
+		if (optee->ops->to_msg_param(optee, arg->params,
+					     arg->num_params, params))
 			arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 		else
 			arg->ret = TEEC_SUCCESS;
@@ -234,10 +238,10 @@ bad:
 	arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 }
 
-static void handle_rpc_supp_cmd(struct tee_context *ctx,
+static void handle_rpc_supp_cmd(struct tee_context *ctx, struct optee *optee,
 				struct optee_msg_arg *arg)
 {
-	struct tee_param *params;
+	struct tee_param *params = NULL;
 
 	arg->ret_origin = TEEC_ORIGIN_COMMS;
 
@@ -248,25 +252,29 @@ static void handle_rpc_supp_cmd(struct tee_context *ctx,
 		return;
 	}
 
-	if (optee_from_msg_param(params, arg->num_params, arg->params)) {
+	if (optee->ops->from_msg_param(optee, params, arg->num_params,
+				       arg->params)) {
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 		goto out;
 	}
 
 	arg->ret = optee_supp_thrd_req(ctx, arg->cmd, arg->num_params, params);
 
-	if (optee_to_msg_param(arg->params, arg->num_params, params))
+	if (optee->ops->to_msg_param(optee, arg->params, arg->num_params,
+				     params))
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 out:
 	kfree(params);
 }
 
+
+
 static struct tee_shm *cmd_alloc_suppl(struct tee_context *ctx, size_t sz)
 {
-	u32 ret;
-	struct tee_param param;
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
-	struct tee_shm *shm;
+	struct tee_param param = { };
+	struct tee_shm *shm = NULL;
+	u32 ret = 0;
 
 	param.attr = TEE_IOCTL_PARAM_ATTR_TYPE_VALUE_INOUT;
 	param.u.value.a = OPTEE_RPC_SHM_TYPE_APPL;
@@ -451,7 +459,7 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 				struct tee_shm *shm,
 				struct optee_call_ctx *call_ctx)
 {
-	struct optee_msg_arg *arg;
+	struct optee_msg_arg *arg = NULL;
 
 	arg = tee_shm_get_va(shm, 0);
 	if (IS_ERR(arg)) {
@@ -480,7 +488,7 @@ static void handle_rpc_func_cmd(struct tee_context *ctx, struct optee *optee,
 		handle_rpc_func_cmd_i2c_transfer(ctx, arg);
 		break;
 	default:
-		handle_rpc_supp_cmd(ctx, arg);
+		handle_rpc_supp_cmd(ctx, optee, arg);
 	}
 }
 
@@ -538,3 +546,95 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
 }
+
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static void handle_ffa_rpc_func_cmd(struct tee_context *ctx,
+				     struct optee *optee,
+				     struct optee_msg_arg *arg)
+{
+	switch (arg->cmd) {
+	case OPTEE_RPC_CMD_GET_TIME:
+		handle_rpc_func_cmd_get_time(arg);
+		break;
+	case OPTEE_RPC_CMD_WAIT_QUEUE:
+		handle_rpc_func_cmd_wq(optee, arg);
+		break;
+	case OPTEE_RPC_CMD_SUSPEND:
+		handle_rpc_func_cmd_wait(arg);
+		break;
+	case OPTEE_RPC_CMD_SHM_ALLOC:
+	case OPTEE_RPC_CMD_SHM_FREE:
+		pr_err("%s: RPC cmd 0x%x: not supported\n", __func__,
+		       arg->cmd);
+		arg->ret = TEEC_ERROR_NOT_SUPPORTED;
+		break;
+	default:
+		handle_rpc_supp_cmd(ctx, optee, arg);
+	}
+}
+
+void optee_handle_ffa_rpc(struct tee_context *ctx, u32 *w4, u32 *w5, u32 *w6)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct tee_shm *shm = NULL;
+	struct optee_msg_arg *rpc_arg = NULL;
+	u64 global_handle = 0;
+	u32 cmd = *w4;
+
+	switch (cmd) {
+	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_KERN_SHM:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_SUPPL_SHM:
+		if (cmd == OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_KERN_SHM)
+			shm = tee_shm_alloc(ctx, *w5 * PAGE_SIZE,
+					    TEE_SHM_MAPPED);
+		else
+			shm = cmd_alloc_suppl(ctx, *w5 * PAGE_SIZE);
+
+		if (IS_ERR_OR_NULL(shm))
+			break;
+
+		*w4 = shm->sec_world_id;
+		*w5 = shm->sec_world_id >> 32;
+		*w6 = shm->offset;
+		return;
+	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_KERN_SHM:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_SUPPL_SHM:
+		global_handle = *w5 | ((u64)*w6 << 32);
+		shm = optee_shm_from_ffa_handle(optee, global_handle);
+		if (!shm) {
+			pr_err("Invalid global handle 0x%llx\n", global_handle);
+			break;
+		}
+		if (cmd == OPTEE_FFA_YIELDING_CALL_RETURN_FREE_KERN_SHM)
+			tee_shm_free(shm);
+		else
+			cmd_free_suppl(ctx, shm);
+		break;
+	case OPTEE_FFA_YIELDING_CALL_RETURN_RPC_CMD:
+		global_handle = *w5 | ((u64)*w6 << 32);
+		shm = optee_shm_from_ffa_handle(optee, global_handle);
+		if (!shm) {
+			pr_err("Invalid global handle 0x%llx\n", global_handle);
+			break;
+		}
+		rpc_arg = tee_shm_get_va(shm, 0);
+		if (IS_ERR(rpc_arg)) {
+			pr_err("Invalid offset 0 for global handle 0x%llx\n",
+			       global_handle);
+			break;
+		}
+		handle_ffa_rpc_func_cmd(ctx, optee, rpc_arg);
+		break;
+	case OPTEE_FFA_YIELDING_CALL_RETURN_INTERRUPT:
+		/* Interrupt delivered by now */
+		break;
+	default:
+		pr_warn("Unknown RPC func 0x%x\n", cmd);
+		break;
+	}
+
+	*w4 = 0;
+	*w5 = 0;
+	*w6 = 0;
+}
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/
