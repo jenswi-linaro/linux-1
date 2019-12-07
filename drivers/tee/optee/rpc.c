@@ -13,6 +13,7 @@
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
 
 struct wq_entry {
 	struct list_head link;
@@ -145,6 +146,7 @@ bad:
 static void handle_rpc_supp_cmd(struct tee_context *ctx,
 				struct optee_msg_arg *arg)
 {
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct tee_param *params;
 
 	arg->ret_origin = TEEC_ORIGIN_COMMS;
@@ -156,7 +158,7 @@ static void handle_rpc_supp_cmd(struct tee_context *ctx,
 		return;
 	}
 
-	if (optee_from_msg_param(params, arg->num_params, arg->params)) {
+	if (optee_from_msg_param(optee, params, arg->num_params, arg->params)) {
 		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
 		goto out;
 	}
@@ -442,4 +444,110 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 	}
 
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
+}
+
+
+static void handle_spci_rpc_func_cmd(struct tee_context *ctx,
+				     struct optee *optee,
+				     struct optee_msg_arg *arg)
+{
+	switch (arg->cmd) {
+	case OPTEE_RPC_CMD_GET_TIME:
+		handle_rpc_func_cmd_get_time(arg);
+		break;
+	case OPTEE_RPC_CMD_WAIT_QUEUE:
+		handle_rpc_func_cmd_wq(optee, arg);
+		break;
+	case OPTEE_RPC_CMD_SUSPEND:
+		handle_rpc_func_cmd_wait(arg);
+		break;
+	case OPTEE_RPC_CMD_SHM_ALLOC:
+	case OPTEE_RPC_CMD_SHM_FREE:
+		pr_err("%s: RPC cmd 0x%x: not supported\n", __func__,
+		       arg->cmd);
+		arg->ret = TEEC_ERROR_NOT_SUPPORTED;
+		break;
+	default:
+		handle_rpc_supp_cmd(ctx, arg);
+	}
+}
+
+static struct tee_shm *find_shm_from_spci_handle(struct optee *optee,
+						 u32 global_handle)
+{
+	struct tee_shm *shm = NULL;
+
+	mutex_lock(&optee->spci_mutex);
+	shm = idr_find(&optee->spci_idr, global_handle);
+	mutex_unlock(&optee->spci_mutex);
+
+	if (!shm)
+		return ERR_PTR(-EINVAL);
+
+	return shm;
+}
+
+void optee_handle_spci_rpc(struct tee_context *ctx,
+			   u32 w4, u32 w5, u32 *w6, u32 w7)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	struct tee_shm *shm = NULL;
+	struct optee_msg_arg *rpc_arg = NULL;
+	u32 global_handle = 0;
+
+	switch (w4) {
+	case OPTEE_SPCI_YIELDING_CALL_RETURN_ALLOC_SHM:
+		if (w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+			shm = cmd_alloc_suppl(ctx, *w6 * PAGE_SIZE);
+		else if (w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+			shm = tee_shm_alloc(ctx, *w6 * PAGE_SIZE,
+					    TEE_SHM_MAPPED);
+		else
+			pr_info("unknown shm type %u", w7);
+
+		if (!IS_ERR_OR_NULL(shm))
+			*w6 = shm->sec_world_id;
+		else
+			*w6 = 0;
+		break;
+	case OPTEE_SPCI_YIELDING_CALL_RETURN_FREE_SHM:
+		global_handle = *w6;
+		*w6 = 0;
+		shm = find_shm_from_spci_handle(optee, global_handle);
+		if (IS_ERR(shm)) {
+			pr_err("Invalid global handle 0x%x\n", global_handle);
+			break;
+		}
+
+		if (w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+			cmd_free_suppl(ctx, shm);
+		else if (w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+			tee_shm_free(shm);
+		else
+			pr_info("unknown shm type %u", w7);
+
+		break;
+	case OPTEE_SPCI_YIELDING_CALL_RETURN_RPC_CMD:
+		global_handle = *w6;
+		*w6 = 0;
+		shm = find_shm_from_spci_handle(optee, global_handle);
+		if (IS_ERR(shm)) {
+			pr_err("Invalid global handle 0x%x\n", global_handle);
+			break;
+		}
+		rpc_arg = tee_shm_get_va(shm, w7);
+		if (IS_ERR(rpc_arg)) {
+			pr_err("Invalid offset 0x%x for global handle 0x%x\n",
+			       w7, global_handle);
+			break;
+		}
+		handle_spci_rpc_func_cmd(ctx, optee, rpc_arg);
+		break;;
+	case OPTEE_SPCI_YIELDING_CALL_RETURN_INTERRUPT:
+		/* Interrupt delivered by now */
+		break;
+	default:
+		pr_warn("Unknown RPC func 0x%x\n", w4);
+		break;
+	}
 }

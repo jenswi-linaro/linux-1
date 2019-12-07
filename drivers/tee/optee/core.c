@@ -6,6 +6,8 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/arm-smccc.h>
+#include <linux/arm-smcccv1_2.h>
+#include <linux/arm_spci.h>
 #include <linux/errno.h>
 #include <linux/io.h>
 #include <linux/module.h>
@@ -19,11 +21,27 @@
 #include <linux/uaccess.h>
 #include "optee_private.h"
 #include "optee_smc.h"
+#include "optee_spci.h"
 #include "shm_pool.h"
 
 #define DRIVER_NAME "optee"
 
 #define OPTEE_SHM_NUM_PRIV_PAGES	CONFIG_OPTEE_SHM_NUM_PRIV_PAGES
+
+static struct tee_shm *find_shm_from_spci_handle(struct optee *optee,
+						 u32 global_handle)
+{
+	struct tee_shm *shm = NULL;
+
+	mutex_lock(&optee->spci_mutex);
+	shm = idr_find(&optee->spci_idr, global_handle);
+	mutex_unlock(&optee->spci_mutex);
+
+	if (!shm)
+		return ERR_PTR(-EINVAL);
+
+	return shm;
+}
 
 /**
  * optee_from_msg_param() - convert from OPTEE_MSG parameters to
@@ -33,7 +51,8 @@
  * @msg_params:	OPTEE_MSG parameters
  * Returns 0 on success or <0 on failure
  */
-int optee_from_msg_param(struct tee_param *params, size_t num_params,
+int optee_from_msg_param(struct optee *optee, struct tee_param *params,
+			 size_t num_params,
 			 const struct optee_msg_param *msg_params)
 {
 	int rc;
@@ -95,10 +114,17 @@ int optee_from_msg_param(struct tee_param *params, size_t num_params,
 			p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT +
 				  attr - OPTEE_MSG_ATTR_TYPE_RMEM_INPUT;
 			p->u.memref.size = mp->u.rmem.size;
+///XXX
+#if 0
 			shm = (struct tee_shm *)(unsigned long)
 				mp->u.rmem.shm_ref;
 
 			if (!shm) {
+#else
+			shm = find_shm_from_spci_handle(optee,
+							mp->u.rmem.shm_ref);
+			if (IS_ERR(shm)) {
+#endif
 				p->u.memref.shm_offs = 0;
 				p->u.memref.shm = NULL;
 				break;
@@ -149,7 +175,12 @@ static int to_msg_param_reg_mem(struct optee_msg_param *mp,
 	mp->attr = OPTEE_MSG_ATTR_TYPE_RMEM_INPUT + p->attr -
 		   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
 
-	mp->u.rmem.shm_ref = (unsigned long)p->u.memref.shm;
+	//XXX
+	//mp->u.rmem.shm_ref = (unsigned long)p->u.memref.shm;
+	if (p->u.memref.shm)
+		mp->u.rmem.shm_ref = p->u.memref.shm->sec_world_id;
+	else
+		mp->u.rmem.shm_ref = 0;
 	mp->u.rmem.size = p->u.memref.size;
 	mp->u.rmem.offs = p->u.memref.shm_offs;
 	return 0;
@@ -189,10 +220,15 @@ int optee_to_msg_param(struct optee_msg_param *msg_params, size_t num_params,
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
+//XXX
+#if 0
 			if (tee_shm_is_registered(p->u.memref.shm))
 				rc = to_msg_param_reg_mem(mp, p);
 			else
 				rc = to_msg_param_tmp_mem(mp, p);
+#else
+			rc = to_msg_param_reg_mem(mp, p);
+#endif
 			if (rc)
 				return rc;
 			break;
@@ -215,6 +251,17 @@ static void optee_get_version(struct tee_device *teedev,
 
 	if (optee->sec_caps & OPTEE_SMC_SEC_CAP_DYNAMIC_SHM)
 		v.gen_caps |= TEE_GEN_CAP_REG_MEM;
+	*vers = v;
+}
+
+static void optee_spci_get_version(struct tee_device *teedev,
+				   struct tee_ioctl_version_data *vers)
+{
+	struct tee_ioctl_version_data v = {
+		.impl_id = TEE_IMPL_ID_OPTEE,
+		.impl_caps = TEE_OPTEE_CAP_TZ,
+		.gen_caps = TEE_GEN_CAP_GP | TEE_GEN_CAP_REG_MEM,
+	};
 	*vers = v;
 }
 
@@ -284,7 +331,20 @@ static void optee_release_supp(struct tee_context *ctx)
 	optee_supp_release(&optee->supp);
 }
 
-static const struct tee_driver_ops optee_ops = {
+static void optee_spci_release(struct tee_context *ctx)
+{
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+}
+
+static void optee_spci_release_supp(struct tee_context *ctx)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	optee_release_helper(ctx, optee_spci_close_session_helper);
+	optee_supp_release(&optee->supp);
+}
+
+static const struct tee_driver_ops optee_legacy_clnt_ops = {
 	.get_version = optee_get_version,
 	.open = optee_open,
 	.release = optee_release,
@@ -296,13 +356,13 @@ static const struct tee_driver_ops optee_ops = {
 	.shm_unregister = optee_shm_unregister,
 };
 
-static const struct tee_desc optee_desc = {
-	.name = DRIVER_NAME "-clnt",
-	.ops = &optee_ops,
+static const struct tee_desc optee_legacy_clnt_desc = {
+	.name = DRIVER_NAME "legacy-clnt",
+	.ops = &optee_legacy_clnt_ops,
 	.owner = THIS_MODULE,
 };
 
-static const struct tee_driver_ops optee_supp_ops = {
+static const struct tee_driver_ops optee_legacy_supp_ops = {
 	.get_version = optee_get_version,
 	.open = optee_open,
 	.release = optee_release_supp,
@@ -312,9 +372,44 @@ static const struct tee_driver_ops optee_supp_ops = {
 	.shm_unregister = optee_shm_unregister_supp,
 };
 
-static const struct tee_desc optee_supp_desc = {
-	.name = DRIVER_NAME "-supp",
-	.ops = &optee_supp_ops,
+static const struct tee_desc optee_legacy_supp_desc = {
+	.name = DRIVER_NAME "legacy-supp",
+	.ops = &optee_legacy_supp_ops,
+	.owner = THIS_MODULE,
+	.flags = TEE_DESC_PRIVILEGED,
+};
+
+static const struct tee_driver_ops optee_spci_clnt_ops = {
+	.get_version = optee_spci_get_version,
+	.open = optee_open,
+	.release = optee_spci_release,
+	.open_session = optee_spci_open_session,
+	.close_session = optee_spci_close_session,
+	.invoke_func = optee_spci_invoke_func,
+	.cancel_req = optee_spci_cancel_req,
+	.shm_register = optee_spci_shm_register,
+	.shm_unregister = optee_spci_shm_unregister,
+};
+
+static const struct tee_desc optee_spci_clnt_desc = {
+	.name = DRIVER_NAME "spci-clnt",
+	.ops = &optee_spci_clnt_ops,
+	.owner = THIS_MODULE,
+};
+
+static const struct tee_driver_ops optee_spci_supp_ops = {
+	.get_version = optee_spci_get_version,
+	.open = optee_open,
+	.release = optee_spci_release_supp,
+	.supp_recv = optee_supp_recv,
+	.supp_send = optee_supp_send,
+	.shm_register = optee_spci_shm_register, /* same as for clnt ops */
+	.shm_unregister = optee_spci_shm_unregister_supp,
+};
+
+static const struct tee_desc optee_spci_supp_desc = {
+	.name = DRIVER_NAME "spci-supp",
+	.ops = &optee_spci_supp_ops,
 	.owner = THIS_MODULE,
 	.flags = TEE_DESC_PRIVILEGED,
 };
@@ -518,16 +613,9 @@ static void optee_smccc_hvc(unsigned long a0, unsigned long a1,
 	arm_smccc_hvc(a0, a1, a2, a3, a4, a5, a6, a7, res);
 }
 
-static optee_invoke_fn *get_invoke_func(struct device_node *np)
+static optee_invoke_fn *get_invoke_func(const char *method)
 {
-	const char *method;
 
-	pr_info("probing for conduit method from DT.\n");
-
-	if (of_property_read_string(np, "method", &method)) {
-		pr_warn("missing \"method\" property\n");
-		return ERR_PTR(-ENXIO);
-	}
 
 	if (!strcmp("hvc", method))
 		return optee_smccc_hvc;
@@ -538,7 +626,7 @@ static optee_invoke_fn *get_invoke_func(struct device_node *np)
 	return ERR_PTR(-EINVAL);
 }
 
-static struct optee *optee_probe(struct device_node *np)
+static struct optee *optee_probe_legacy(const char *method)
 {
 	optee_invoke_fn *invoke_fn;
 	struct tee_shm_pool *pool = ERR_PTR(-EINVAL);
@@ -548,7 +636,7 @@ static struct optee *optee_probe(struct device_node *np)
 	u32 sec_caps;
 	int rc;
 
-	invoke_fn = get_invoke_func(np);
+	invoke_fn = get_invoke_func(method);
 	if (IS_ERR(invoke_fn))
 		return (void *)invoke_fn;
 
@@ -593,14 +681,14 @@ static struct optee *optee_probe(struct device_node *np)
 	optee->invoke_fn = invoke_fn;
 	optee->sec_caps = sec_caps;
 
-	teedev = tee_device_alloc(&optee_desc, NULL, pool, optee);
+	teedev = tee_device_alloc(&optee_legacy_clnt_desc, NULL, pool, optee);
 	if (IS_ERR(teedev)) {
 		rc = PTR_ERR(teedev);
 		goto err;
 	}
 	optee->teedev = teedev;
 
-	teedev = tee_device_alloc(&optee_supp_desc, NULL, pool, optee);
+	teedev = tee_device_alloc(&optee_legacy_supp_desc, NULL, pool, optee);
 	if (IS_ERR(teedev)) {
 		rc = PTR_ERR(teedev);
 		goto err;
@@ -646,6 +734,200 @@ err:
 	return ERR_PTR(rc);
 }
 
+static bool optee_spci_api_is_compatbile(struct spci_ops *spci_ops, u32 dst)
+{
+	struct arm_smcccv1_2_return ret = { };
+
+	ret = spci_ops->sync_msg_send(dst, OPTEE_SPCI_GET_API_VERSION,
+				      0, 0, 0, 0);
+	if (ret.func != SPCI_SUCCESS) {
+		pr_err("Unexpected return fid 0x%llx", ret.func);
+		return false;
+	}
+	if (ret.arg3 != OPTEE_SPCI_VERSION_MAJOR ||
+	    ret.arg4 < OPTEE_SPCI_VERSION_MINOR) {
+		pr_err("Incompatible OP-TEE API version %llu.%llu",
+		       ret.arg3, ret.arg4);
+		return false;
+	}
+
+	ret = spci_ops->sync_msg_send(dst, OPTEE_SPCI_GET_OS_VERSION,
+				      0, 0, 0, 0);
+	if (ret.func) {
+		pr_err("Unexpected error 0x%llx", ret.func);
+		return false;
+	}
+	if (ret.arg5)
+		pr_info("revision %llu.%llu (%08llx)",
+			ret.arg3, ret.arg4, ret.arg5);
+	else
+		pr_info("revision %llu.%llu", ret.arg3, ret.arg4);
+
+	return true;
+}
+
+static bool optee_spci_exchange_caps(struct spci_ops *spci_ops, u32 dst,
+				     u32 *sec_caps)
+{
+	struct arm_smcccv1_2_return ret = { };
+
+	ret = spci_ops->sync_msg_send(dst, OPTEE_SPCI_EXCHANGE_CAPABILITIES,
+				      0, 0, 0, 0);
+	if (ret.func) {
+		pr_err("Unexpected error 0x%llx", ret.func);
+		return false;
+	}
+
+	*sec_caps = 0;
+
+	return true;
+}
+
+static struct tee_shm_pool *optee_spci_config_dyn_shm(void)
+{
+	struct tee_shm_pool_mgr *priv_mgr;
+	struct tee_shm_pool_mgr *dmabuf_mgr;
+	void *rc;
+
+	rc = optee_spci_shm_pool_alloc_pages();
+	if (IS_ERR(rc))
+		return rc;
+	priv_mgr = rc;
+
+	rc = optee_spci_shm_pool_alloc_pages();
+	if (IS_ERR(rc)) {
+		tee_shm_pool_mgr_destroy(priv_mgr);
+		return rc;
+	}
+	dmabuf_mgr = rc;
+
+	rc = tee_shm_pool_alloc(priv_mgr, dmabuf_mgr);
+	if (IS_ERR(rc)) {
+		tee_shm_pool_mgr_destroy(priv_mgr);
+		tee_shm_pool_mgr_destroy(dmabuf_mgr);
+	}
+
+	return rc;
+}
+
+static struct optee *optee_probe_spci(void)
+{
+	struct tee_device *teedev = NULL;
+	struct spci_ops *spci_ops = NULL;
+	struct optee *optee = NULL;
+	u32 spci_dst = 0;
+	u32 sec_caps = 0;
+	int rc = 0;
+
+	spci_ops = get_spci_ops();
+	if (!spci_ops) {
+		pr_warn("failed \"method\" init: spci\n");
+		return ERR_PTR(-ENOENT);
+	}
+
+	/*
+	 * TODO: Update the destination ID (first argument). Sending the
+	 * message to VM with id 0x8001 as this is the convention being
+	 * used in Hafnium.  The Hafnium prototype considers that ids >
+	 * 0x7fff are on the secure world, whereas the remainder are in the
+	 * normal world. Need to revisit this.
+	 */
+	spci_dst = 0x8001;
+	if (!optee_spci_api_is_compatbile(spci_ops, spci_dst))
+		return ERR_PTR(-EINVAL);
+
+	if (!optee_spci_exchange_caps(spci_ops, spci_dst, &sec_caps))
+		return ERR_PTR(-EINVAL);
+
+	optee = kzalloc(sizeof(*optee), GFP_KERNEL);
+	if (!optee) {
+		rc = -ENOMEM;
+		goto err;
+	}
+	optee->pool = optee_spci_config_dyn_shm();
+	if (IS_ERR(optee->pool)) {
+		rc = PTR_ERR(optee->pool);
+		optee->pool = NULL;
+		goto err;
+	}
+
+	optee->spci_ops = spci_ops;
+	optee->spci_dst = spci_dst;
+	optee->sec_caps = sec_caps;
+
+	teedev = tee_device_alloc(&optee_spci_clnt_desc, NULL, optee->pool,
+				  optee);
+	if (IS_ERR(teedev)) {
+		rc = PTR_ERR(teedev);
+		goto err;
+	}
+	optee->teedev = teedev;
+
+	teedev = tee_device_alloc(&optee_spci_supp_desc, NULL, optee->pool,
+				  optee);
+	if (IS_ERR(teedev)) {
+		rc = PTR_ERR(teedev);
+		goto err;
+	}
+	optee->supp_teedev = teedev;
+
+	rc = tee_device_register(optee->teedev);
+	if (rc)
+		goto err;
+
+	rc = tee_device_register(optee->supp_teedev);
+	if (rc)
+		goto err;
+
+	idr_init(&optee->spci_idr);
+	mutex_init(&optee->spci_mutex);
+	mutex_init(&optee->call_queue.mutex);
+	INIT_LIST_HEAD(&optee->call_queue.waiters);
+	optee_wait_queue_init(&optee->wait_queue);
+	optee_supp_init(&optee->supp);
+
+	return optee;
+err:
+	/*
+	 * tee_device_unregister() is safe to call even if the
+	 * devices hasn't been registered with
+	 * tee_device_register() yet.
+	 */
+	tee_device_unregister(optee->supp_teedev);
+	tee_device_unregister(optee->teedev);
+	if (optee->pool)
+		tee_shm_pool_free(optee->pool);
+	kfree(optee);
+	return ERR_PTR(rc);
+}
+
+static const char *get_conduit_method(struct device_node *np)
+{
+	const char *method = NULL;
+
+	pr_info("probing for conduit method from DT.\n");
+
+	if (of_property_read_string(np, "method", &method)) {
+		pr_warn("missing \"method\" property\n");
+		return NULL;
+	}
+
+	return method;
+}
+
+static struct optee *optee_probe(struct device_node *np)
+{
+	const char *method = get_conduit_method(np);
+
+	if (!method)
+		return ERR_PTR(-ENXIO);
+
+	if (!strcmp(method, "spci"))
+		return optee_probe_spci();
+	else
+		return optee_probe_legacy(method);
+}
+
 static void optee_remove(struct optee *optee)
 {
 	/*
@@ -653,7 +935,10 @@ static void optee_remove(struct optee *optee)
 	 * reference counters and also avoid wild pointers in secure world
 	 * into the old shared memory range.
 	 */
-	optee_disable_shm_cache(optee);
+	if (optee->invoke_fn)
+		optee_disable_shm_cache(optee);
+	else
+		optee_spci_disable_shm_cache(optee);
 
 	/*
 	 * The two devices has to be unregistered before we can free the
@@ -668,6 +953,8 @@ static void optee_remove(struct optee *optee)
 	optee_wait_queue_exit(&optee->wait_queue);
 	optee_supp_uninit(&optee->supp);
 	mutex_destroy(&optee->call_queue.mutex);
+	mutex_destroy(&optee->spci_mutex);
+	idr_destroy(&optee->spci_idr);
 
 	kfree(optee);
 }
