@@ -17,6 +17,7 @@
 /* Some Global Platform error codes used in this driver */
 #define TEEC_SUCCESS			0x00000000
 #define TEEC_ERROR_BAD_PARAMETERS	0xFFFF0006
+#define TEEC_ERROR_NOT_SUPPORTED	0xFFFF000A
 #define TEEC_ERROR_COMMUNICATION	0xFFFF000E
 #define TEEC_ERROR_OUT_OF_MEMORY	0xFFFF000C
 #define TEEC_ERROR_SHORT_BUFFER		0xFFFF0010
@@ -66,6 +67,32 @@ struct optee_supp {
 };
 
 /**
+ * struct optee_spci_data -  SPCI communication struct
+ * @dst			SPCI destination id, the id of OP-TEE in secure world
+ * @ops			SPCI operations
+ * @mutex		Serializes access to @idr
+ * @idr			SPCI shared memory global handle translation
+ */
+struct optee_spci {
+	u32 dst;
+	struct spci_ops *ops;
+	struct mutex mutex;
+	struct idr idr;
+};
+
+struct optee;
+struct optee_ops {
+	int (*do_call_with_arg)(struct tee_context *ctx,
+				struct tee_shm *shm_arg);
+	int (*to_msg_param)(struct optee *optee,
+			    struct optee_msg_param *msg_params,
+			    size_t num_params, const struct tee_param *params);
+	int (*from_msg_param)(struct optee *optee, struct tee_param *params,
+			      size_t num_params,
+			      const struct optee_msg_param *msg_params);
+};
+
+/**
  * struct optee - main service struct
  * @supp_teedev:	supplicant device
  * @teedev:		client device
@@ -82,7 +109,11 @@ struct optee_supp {
 struct optee {
 	struct tee_device *supp_teedev;
 	struct tee_device *teedev;
+	const struct optee_ops *ops;
 	optee_invoke_fn *invoke_fn;
+#ifdef CONFIG_ARM_SPCI_TRANSPORT
+	struct optee_spci spci;
+#endif
 	struct optee_call_queue call_queue;
 	struct optee_wait_queue wait_queue;
 	struct optee_supp supp;
@@ -141,7 +172,7 @@ int optee_supp_recv(struct tee_context *ctx, u32 *func, u32 *num_params,
 int optee_supp_send(struct tee_context *ctx, u32 ret, u32 num_params,
 		    struct tee_param *param);
 
-u32 optee_do_call_with_arg(struct tee_context *ctx, phys_addr_t parg);
+int optee_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
 int optee_open_session(struct tee_context *ctx,
 		       struct tee_ioctl_open_session_arg *arg,
 		       struct tee_param *param);
@@ -164,17 +195,34 @@ int optee_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
 			    unsigned long start);
 int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm);
 
-int optee_from_msg_param(struct tee_param *params, size_t num_params,
-			 const struct optee_msg_param *msg_params);
-int optee_to_msg_param(struct optee_msg_param *msg_params, size_t num_params,
-		       const struct tee_param *params);
-
 u64 *optee_allocate_pages_list(size_t num_entries);
 void optee_free_pages_list(void *array, size_t num_entries);
 void optee_fill_pages_list(u64 *dst, struct page **pages, int num_pages,
 			   size_t page_offset);
 
 int optee_enumerate_devices(void);
+
+int optee_shm_add_spci_handle(struct optee *optee, struct tee_shm *shm,
+			      u32 global_handle);
+int optee_shm_rem_spci_handle(struct optee *optee, u32 global_handle);
+struct tee_shm *optee_shm_from_spci_handle(struct optee *optee,
+					   u32 global_handle);
+void optee_spci_disable_shm_cache(struct optee *optee);
+
+int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			    struct page **pages, size_t num_pages,
+			    unsigned long start);
+int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm);
+int optee_spci_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
+				 struct page **pages, size_t num_pages,
+				 unsigned long start);
+int optee_spci_shm_unregister_supp(struct tee_context *ctx,
+				   struct tee_shm *shm);
+
+int optee_spci_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
+int optee_spci_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
+void optee_handle_spci_rpc(struct tee_context *ctx,
+			   u32 w4, u32 w5, u32 *w6, u32 w7);
 
 /*
  * Small helpers
