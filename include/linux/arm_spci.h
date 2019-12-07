@@ -3,6 +3,9 @@
  * Copyright (C) 2019 Arm Ltd.
  */
 
+#ifndef __LINUX_ARM_SPCI_H
+#define __LINUX_ARM_SPCI_H
+
 #define SPCI_ERROR_32                 0x84000060
 #define SPCI_SUCCESS_32               0x84000061
 
@@ -41,3 +44,5 @@ struct spci_ops *get_spci_ops(void);
 #else
 static inline struct spci_ops *get_spci_ops(void) { return NULL; }
 #endif
+
+#endif /*__LINUX_ARM_SPCI_H*/
