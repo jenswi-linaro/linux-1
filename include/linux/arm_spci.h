@@ -14,6 +14,8 @@
 #define SPCI_MSG_SEND_32              0x8400006E
 #define SPCI_MSG_SEND_DIRECT_REQ_32   0x8400006F
 #define SPCI_MSG_SEND_DIRECT_RESP_32  0x84000070
+#define SPCI_MEM_SHARE_32             0x84000073
+#define SPCI_MEM_RECLAIM_32           0x84000077
 
 /* SPCI error codes. */
 #define SPCI_SUCCESS            (0)
@@ -25,8 +27,15 @@
 #define SPCI_DENIED             (-6)
 #define SPCI_RETRY              (-7)
 
+struct page;
+
 /* The type of a SPCI endpoint ID */
 typedef u16 spci_sp_id_t;
+
+struct spci_mem_region_attributes {
+	spci_sp_id_t receiver;
+	u16 attrs;
+};
 
 /**
  * struct spci_ops - represents the various SPCI protocol operations
@@ -37,6 +46,14 @@ struct spci_ops {
 	struct arm_smcccv1_2_return
 	(*sync_msg_send)(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 			 u64 w6, u64 w7);
+
+	int (*mem_share)(u32 tag, u32 flags,
+			 struct spci_mem_region_attributes *attrs,
+			 u_int num_attrs, struct page **pages,
+			 u_int num_pages, u32 *global_handle);
+
+	int (*mem_reclaim)(u32 global_handle, u32 flags);
+
 };
 
 #if IS_REACHABLE(CONFIG_ARM_SPCI_TRANSPORT)

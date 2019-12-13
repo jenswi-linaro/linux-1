@@ -16,6 +16,22 @@
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/module.h>
+#include <linux/slab.h>
+
+struct spci_mem_region_descr {
+	u32 tag;
+	u32 flags;
+	u32 total_page_count;
+	u32 constituent_mem_region_count;
+	u32 constituent_mem_region_offs;
+	u32 mem_region_attr_count;
+	struct spci_mem_region_attributes attrs[];
+};
+
+struct spmc_constituent_mem_region {
+	u64 addr;
+	u32 page_count;
+} __packed;
 
 static spci_sp_id_t vm_id;
 
@@ -103,6 +119,106 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	return ret;
 }
 
+static int spci_mem_share(u32 tag, u32 flags,
+			  struct spci_mem_region_attributes *attrs,
+			  u_int num_attrs, struct page **pages,
+			  u_int num_pages, u32 *global_handle)
+{
+	struct spmc_constituent_mem_region *mreg = NULL;
+	struct spci_mem_region_descr *descr = NULL;
+	struct arm_smcccv1_2_return ret = { 0 };
+	u_int descr_size = 0;
+	u_int num_regs = 0;
+	u_int n = 0;
+	u_int num_descr_pages = 0;
+	phys_addr_t last_pa = -1;
+
+	for (n = 0; n < num_pages; n++) {
+		if (page_to_phys(pages[n]) != last_pa + PAGE_SIZE)
+			num_regs++;
+		last_pa = page_to_phys(pages[n]);
+	}
+
+	descr_size = sizeof(*descr) + sizeof(*attrs) * num_attrs +
+		     sizeof(struct spmc_constituent_mem_region) * num_regs;
+	descr = alloc_pages_exact(descr_size, GFP_KERNEL);
+	if (!descr)
+		return -ENOMEM;
+
+	mreg = (void *)&descr->attrs[num_attrs];
+	descr->tag = tag;
+	descr->flags = flags;
+	descr->total_page_count = num_pages;
+	descr->constituent_mem_region_count = num_regs;
+	descr->constituent_mem_region_offs = (u_long)mreg - (u_long)descr;
+	descr->mem_region_attr_count = num_attrs;
+	memcpy(descr->attrs, attrs, sizeof(*attrs) * num_attrs);
+
+	last_pa = -1;
+	num_regs = 0;
+	for (n = 0; n < num_pages; n++) {
+		if (page_to_phys(pages[n]) == last_pa + PAGE_SIZE) {
+			mreg[num_regs - 1].page_count++;
+		} else {
+			mreg[num_regs].addr = page_to_phys(pages[n]);
+			mreg[num_regs].page_count = 1;
+			num_regs++;
+		}
+		last_pa = page_to_phys(pages[n]);
+	}
+
+	num_descr_pages = round_up(descr_size, PAGE_SIZE) / PAGE_SIZE;
+	ret = arm_spci_smccc(SPCI_MEM_SHARE_32, virt_to_phys(descr),
+			     num_descr_pages, descr_size, descr_size,
+			     0, 0, 0);
+	free_pages_exact(descr, descr_size);
+
+	if (ret.func == SPCI_SUCCESS_32) {
+		*global_handle = ret.arg2;
+		return 0;
+	}
+
+	if (ret.func == SPCI_ERROR_32) {
+		pr_err("%s: Error sending message %llu\n", __func__, ret.func);
+		switch (ret.arg1) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+		case SPCI_NOT_SUPPORTED:
+			return -EIO;
+		case SPCI_BUSY:
+			return -EAGAIN;
+		}
+	}
+
+	return -EIO;
+}
+
+static int spci_mem_reclaim(u32 global_handle, u32 flags)
+{
+	struct arm_smcccv1_2_return ret;
+
+	ret = arm_spci_smccc(SPCI_MEM_RECLAIM_32, global_handle, flags,
+			     0, 0, 0, 0, 0);
+	if (ret.func == SPCI_SUCCESS_32)
+		return 0;
+
+	if (ret.func == SPCI_ERROR_32) {
+		pr_err("%s: Error sending message %llu\n", __func__, ret.func);
+		switch (ret.arg1) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+		case SPCI_NOT_SUPPORTED:
+			return -EIO;
+		case SPCI_BUSY:
+			return -EAGAIN;
+		}
+	}
+
+	return -EIO;
+}
+
 static spci_sp_id_t spci_id_get(void)
 {
 	struct  arm_smcccv1_2_return id_get_return =
@@ -117,6 +233,8 @@ static spci_sp_id_t spci_id_get(void)
 static struct spci_ops spci_ops = {
 	.async_msg_send = spci_msg_send,
 	.sync_msg_send = spci_msg_send_direct_req,
+	.mem_share = spci_mem_share,
+	.mem_reclaim = spci_mem_reclaim,
 };
 
 struct spci_ops *get_spci_ops(void)
@@ -157,6 +275,7 @@ static int spci_probe(struct platform_device *pdev)
 
 	/* Initialize VM ID. */
 	vm_id = spci_id_get();
+	pr_info("vm_id 0x%x\n", vm_id);
 
 	return 0;
 }
