@@ -7,7 +7,7 @@
  * residing on other Secure Partitions or Virtual Machines managed by any SPCI
  * compliant firmware framework.
  *
- * Copyright (C) 2019 Arm Ltd.
+ * Copyright (C) 2019, 2020 Arm Ltd.
  */
 
 #include <linux/platform_device.h>
@@ -17,6 +17,10 @@
 #include <linux/of_platform.h>
 #include <linux/module.h>
 #include <linux/mm.h>
+
+
+static DEFINE_MUTEX(rx_lock);
+static DEFINE_MUTEX(tx_lock);
 
 static spci_sp_id_t vm_id;
 
@@ -107,6 +111,171 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	return ret;
 }
 
+static inline u16 set_mem_attributes(enum spci_mem_permission perm,
+	enum spci_mem_type type)
+{
+	return perm << 5 | type << 4;
+}
+
+static inline u32 compute_constituent_offset(u32 num_attributes)
+{
+	u32 constituent_offset = sizeof(struct spci_mem_region) +
+		sizeof(struct spci_mem_region_attributes)*num_attributes;
+
+	/* ensure constituents are 8 byte aligned. */
+	if (constituent_offset & 0x7)
+		return (constituent_offset & (~(uintptr_t)0x7)) + 0x8;
+
+	return constituent_offset;
+}
+
+static inline u32 compute_region_length(u32 num_constituents,
+	u32 num_attributes)
+{
+	return compute_constituent_offset(num_attributes) +
+		sizeof(struct spci_mem_region_constituent)*num_constituents;
+}
+
+/*
+ * Share set of pages with a set of pages with a list of destination endpoints.
+ * Returns a system-wide unique handle
+ */
+int spci_share_memory(u32 tag, u32 flags,
+	struct spci_mem_region_attributes *attrs,
+	u32 num_attrs, struct page *pages[],
+	u32 num_pages, u32 *global_handle)
+{
+	struct spci_mem_region *mem_region;
+	u32 index;
+	u32 num_constituents;
+	struct spci_mem_region_constituent *constituents;
+	struct arm_smcccv1_2_return smccc_return;
+	u32 length;
+	int rc = 0;
+
+	mem_region = (struct spci_mem_region *)page_address(tx_buffer);
+
+	mem_region->flags = flags;
+	mem_region->tag = tag;
+
+
+
+	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
+
+	/* Ensure attribute description fits withing the Tx buffer. */
+	if (mem_region->constituent_offset >= SPCI_BASE_GRANULE_SIZE) {
+		rc = -ENXIO;
+		goto err;
+	}
+
+	constituents = (struct spci_mem_region_constituent *)
+		(((uintptr_t)mem_region) + mem_region->constituent_offset);
+
+	for (index = 0; index < num_attrs; index++) {
+		mem_region->attributes[index].receiver = attrs[index].receiver;
+		mem_region->attributes[index].attrs =
+			attrs[index].attrs;
+	}
+	mem_region->attribute_count = num_attrs;
+
+	/* Fill in the constituents. */
+	constituents[0].address = page_to_phys(pages[0]);
+	pr_devel("arm_spci mem_share pa=%#X\n", constituents[0].address);
+	constituents[0].page_count = 1;
+	num_constituents = 1;
+	for (index = 1; index < num_pages; index++) {
+
+		phys_addr_t address = page_to_phys(pages[index]);
+
+		pr_devel("arm_spci mem_share pa=%#X\n", address);
+
+		if (address != (constituents[num_constituents - 1].address +
+			SPCI_BASE_GRANULE_SIZE)) {
+
+			/*
+			 * Ensure the constituent is fully within the Tx
+			 * buffer boundary.
+			 */
+			if (compute_region_length(num_constituents + 1,
+				num_attrs) > SPCI_BASE_GRANULE_SIZE) {
+				rc = -ENXIO;
+				goto err;
+			}
+
+			constituents[num_constituents].address = address;
+			constituents[num_constituents].page_count = 1;
+			num_constituents++;
+		} else {
+			constituents[num_constituents - 1].page_count++;
+		}
+	}
+
+	/* Write the SPCI memory region descriptor onto the Tx buffer. */
+	mem_region->constituent_count = num_constituents;
+
+	length = compute_region_length(num_constituents, num_attrs);
+
+	smccc_return =
+		arm_spci_smccc(SPCI_MEM_SHARE_64, 0, 0, length, length, 0, 0,
+			0);
+
+	if (smccc_return.func == SPCI_ERROR_32) {
+		switch (smccc_return.arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			rc = -ENXIO;
+			goto err;
+		case SPCI_DENIED:
+			rc = -EIO;
+			goto err;
+		case SPCI_NO_MEMORY:
+			rc = -ENOMEM;
+			goto err;
+		case SPCI_RETRY:
+			rc = -EAGAIN;
+			goto err;
+		default:
+			pr_warn("%s: Unknown Error code %x\n", __func__,
+				smccc_return.arg2);
+			rc = -EIO;
+			goto err;
+		}
+	}
+
+	*global_handle = smccc_return.arg2;
+err:
+	mutex_unlock(&tx_lock);
+	return rc;
+}
+
+static int spci_memory_reclaim(u32 global_handle, bool clear_memory)
+{
+	struct arm_smcccv1_2_return smccc_return;
+	u32 flags = clear_memory ? 0x1 : 0x0;
+
+	smccc_return = arm_spci_smccc(SPCI_MEM_RECLAIM_32, global_handle, flags,
+			     0, 0, 0, 0, 0);
+
+	if (smccc_return.func == SPCI_ERROR_32) {
+		pr_err("%s: Error sending message %llu\n", __func__,
+			smccc_return.func);
+		switch (smccc_return.arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+		case SPCI_NOT_SUPPORTED:
+			return -EIO;
+		case SPCI_BUSY:
+			return -EAGAIN;
+		default:
+			pr_warn("%s: Unknown Error code %x\n", __func__,
+				smccc_return.arg2);
+			return -EIO;
+		}
+	}
+
+	return 0;
+}
+
 static spci_sp_id_t spci_id_get(void)
 {
 	struct  arm_smcccv1_2_return id_get_return =
@@ -121,6 +290,8 @@ static spci_sp_id_t spci_id_get(void)
 static struct spci_ops spci_ops = {
 	.async_msg_send = spci_msg_send,
 	.sync_msg_send = spci_msg_send_direct_req,
+	.mem_share = spci_share_memory,
+	.mem_reclaim = spci_memory_reclaim,
 };
 
 struct spci_ops *get_spci_ops(void)
