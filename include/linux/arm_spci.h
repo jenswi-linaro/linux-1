@@ -6,6 +6,8 @@
 #define SPCI_ERROR_32                 0x84000060
 #define SPCI_SUCCESS_32               0x84000061
 
+#define SPCI_RXTX_MAP_32              0x84000066
+
 #define SPCI_ID_GET_32                0x84000069
 
 #define SPCI_MSG_SEND_32              0x8400006E

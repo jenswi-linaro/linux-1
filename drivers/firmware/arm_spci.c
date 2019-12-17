@@ -16,8 +16,12 @@
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
 #include <linux/module.h>
+#include <linux/mm.h>
 
 static spci_sp_id_t vm_id;
+
+static struct page *rx_buffer;
+static struct page *tx_buffer;
 
 static struct arm_smcccv1_2_return
 (*arm_spci_smccc)(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,
@@ -151,12 +155,80 @@ static const struct of_device_id spci_of_match[] = {
 	{},
 };
 
+static int spci_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
+{
+	struct arm_smcccv1_2_return map_return;
+
+	map_return = arm_spci_smccc(SPCI_RXTX_MAP_32, tx_page,
+					 rx_page, 1, 0, 0, 0, 0);
+
+	if (map_return.func == SPCI_ERROR_32) {
+		switch (map_return.arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+			return -EAGAIN;
+		case SPCI_NO_MEMORY:
+			return -ENOMEM;
+		case SPCI_NOT_SUPPORTED:
+			return -ENODEV;
+
+		default:
+			panic("%s: Unhandled return code (%lld)\n", __func__,
+			      map_return.arg2);
+		}
+	}
+
+	return 0;
+}
+
 static int spci_probe(struct platform_device *pdev)
 {
+	int ret;
+
 	spci_dt_init(pdev->dev.of_node);
 
 	/* Initialize VM ID. */
 	vm_id = spci_id_get();
+
+	/* Allocate Rx buffer. */
+	rx_buffer = alloc_page(GFP_KERNEL);
+
+	/*
+	 * Ensure buffer was correctly allocated and that the refcout was
+	 * incremented.
+	 */
+	if (!rx_buffer || !try_get_page(rx_buffer)) {
+		pr_err("%s: failed to allocate SPCI Rx buffer\n", __func__);
+		return -ENOMEM;
+	}
+
+	/* Allocate Tx buffer. */
+	tx_buffer = alloc_page(GFP_KERNEL);
+
+	/*
+	 * Ensure buffer was correctly allocated and that the refcout was
+	 * incremented.
+	 */
+	if (!tx_buffer || !try_get_page(rx_buffer)) {
+		put_page(rx_buffer);
+		__free_page(rx_buffer);
+
+		pr_err("%s: failed to allocate SPCI Tx buffer\n", __func__);
+		return -ENOMEM;
+	}
+
+	/* Register the RxTx buffers with the SPCI supervisor implementation. */
+	ret = spci_rxtx_map(page_to_phys(tx_buffer), page_to_phys(rx_buffer));
+	if (ret) {
+		put_page(rx_buffer);
+		put_page(tx_buffer);
+		__free_page(rx_buffer);
+		__free_page(tx_buffer);
+
+		pr_err("%s: failed to register SPCI RxTx buffers\n", __func__);
+		return ret;
+	}
 
 	return 0;
 }
