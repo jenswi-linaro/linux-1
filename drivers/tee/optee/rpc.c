@@ -476,7 +476,7 @@ static void handle_spci_rpc_func_cmd(struct tee_context *ctx,
 }
 
 void optee_handle_spci_rpc(struct tee_context *ctx,
-			   u32 w4, u32 w5, u32 *w6, u32 w7)
+			   u32 w4, u32 w5, u32 *w6, u32 *w7)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct tee_shm *shm = NULL;
@@ -485,18 +485,21 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 
 	switch (w4) {
 	case OPTEE_SPCI_YIELDING_CALL_RETURN_ALLOC_SHM:
-		if (w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+		if (*w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
 			shm = cmd_alloc_suppl(ctx, *w6 * PAGE_SIZE);
-		else if (w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+		else if (*w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
 			shm = tee_shm_alloc(ctx, *w6 * PAGE_SIZE,
 					    TEE_SHM_MAPPED);
 		else
-			pr_info("unknown shm type %u", w7);
+			pr_info("unknown shm type %u", *w7);
 
-		if (!IS_ERR_OR_NULL(shm))
+		if (!IS_ERR_OR_NULL(shm)) {
 			*w6 = shm->sec_world_id;
-		else
+			*w7 = shm->offset;
+		} else {
 			*w6 = 0;
+			*w7 = 0;
+		}
 		break;
 	case OPTEE_SPCI_YIELDING_CALL_RETURN_FREE_SHM:
 		global_handle = *w6;
@@ -504,16 +507,18 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 		shm = optee_shm_from_spci_handle(optee, global_handle);
 		if (!shm) {
 			pr_err("Invalid global handle 0x%x\n", global_handle);
+			*w7 = 0;
 			break;
 		}
 
-		if (w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+		if (*w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
 			cmd_free_suppl(ctx, shm);
-		else if (w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+		else if (*w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
 			tee_shm_free(shm);
 		else
-			pr_info("unknown shm type %u", w7);
+			pr_info("unknown shm type %u", *w7);
 
+		*w7 = 0;
 		break;
 	case OPTEE_SPCI_YIELDING_CALL_RETURN_RPC_CMD:
 		global_handle = *w6;
@@ -523,14 +528,16 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 			pr_err("Invalid global handle 0x%x\n", global_handle);
 			break;
 		}
-		rpc_arg = tee_shm_get_va(shm, w7);
+		rpc_arg = tee_shm_get_va(shm, *w7);
 		if (IS_ERR(rpc_arg)) {
 			pr_err("Invalid offset 0x%x for global handle 0x%x\n",
-			       w7, global_handle);
+			       *w7, global_handle);
+			*w7 = 0;
 			break;
 		}
 		handle_spci_rpc_func_cmd(ctx, optee, rpc_arg);
-		break;;
+		*w7 = 0;
+		break;
 	case OPTEE_SPCI_YIELDING_CALL_RETURN_INTERRUPT:
 		/* Interrupt delivered by now */
 		break;

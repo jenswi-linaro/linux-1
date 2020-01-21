@@ -222,7 +222,7 @@ int optee_spci_shm_unregister_supp(struct tee_context *ctx,
 int optee_spci_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
 int optee_spci_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
 void optee_handle_spci_rpc(struct tee_context *ctx,
-			   u32 w4, u32 w5, u32 *w6, u32 w7);
+			   u32 w4, u32 w5, u32 *w6, u32 *w7);
 
 /*
  * Small helpers
