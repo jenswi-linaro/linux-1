@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2015-2016, Linaro Limited
+ * Copyright (c) 2015-2020, Linaro Limited
  */
 #ifndef _OPTEE_MSG_H
 #define _OPTEE_MSG_H
@@ -23,6 +23,9 @@
 #define OPTEE_MSG_ATTR_TYPE_RMEM_INPUT		0x5
 #define OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT		0x6
 #define OPTEE_MSG_ATTR_TYPE_RMEM_INOUT		0x7
+#define OPTEE_MSG_ATTR_TYPE_SMEM_INPUT		OPTEE_MSG_ATTR_TYPE_RMEM_INPUT
+#define OPTEE_MSG_ATTR_TYPE_SMEM_OUTPUT		OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT
+#define OPTEE_MSG_ATTR_TYPE_SMEM_INOUT		OPTEE_MSG_ATTR_TYPE_RMEM_INOUT
 #define OPTEE_MSG_ATTR_TYPE_TMEM_INPUT		0x9
 #define OPTEE_MSG_ATTR_TYPE_TMEM_OUTPUT		0xa
 #define OPTEE_MSG_ATTR_TYPE_TMEM_INOUT		0xb
@@ -123,6 +126,23 @@ struct optee_msg_param_rmem {
 };
 
 /**
+ * struct optee_msg_param_smem - spci memory reference parameter
+ * @offs:	   Offset into shared memory reference
+ * @size:          Size of the buffer
+ * @internal_offs: Internal offset into the first page of shared memory
+ *                 reference
+ * @page_count:    Page count of shared memory reference
+ * @global_id:     Global identifier of Shared memory
+ */
+struct optee_msg_param_smem {
+	u64 offs;
+	u64 size;
+	u16 internal_offs;
+	u16 page_count;
+	u32 global_id;
+};
+
+/**
  * struct optee_msg_param_value - opaque value parameter
  *
  * Value parameters are passed unchecked between normal and secure world.
@@ -138,12 +158,14 @@ struct optee_msg_param_value {
  * @attr:	attributes
  * @tmem:	parameter by temporary memory reference
  * @rmem:	parameter by registered memory reference
+ * @smem:	parameter by spci registered memory reference
  * @value:	parameter by opaque value
  *
  * @attr & OPTEE_MSG_ATTR_TYPE_MASK indicates if tmem, rmem or value is used in
  * the union. OPTEE_MSG_ATTR_TYPE_VALUE_* indicates value,
  * OPTEE_MSG_ATTR_TYPE_TMEM_* indicates @tmem and
- * OPTEE_MSG_ATTR_TYPE_RMEM_* indicates @rmem.
+ * OPTEE_MSG_ATTR_TYPE_RMEM_* or the alias PTEE_MSG_ATTR_TYPE_SMEM_* indicates
+ * @rmem or @smem depending on the conduit.
  * OPTEE_MSG_ATTR_TYPE_NONE indicates that none of the members are used.
  */
 struct optee_msg_param {
@@ -151,6 +173,7 @@ struct optee_msg_param {
 	union {
 		struct optee_msg_param_tmem tmem;
 		struct optee_msg_param_rmem rmem;
+		struct optee_msg_param_smem smem;
 		struct optee_msg_param_value value;
 	} u;
 };

@@ -696,7 +696,7 @@ int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 
 #ifdef CONFIG_ARM_SPCI_TRANSPORT
 static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
-				    u32 w6)
+				    u32 w6, u32 w7)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct arm_smcccv1_2_return ret = { };
@@ -708,7 +708,7 @@ static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 	/* Initialize waiter */
 	optee_cq_wait_init(&optee->call_queue, &w);
 	while (true) {
-		ret = optee->spci.ops->sync_msg_send(dst, w3, w4, w5, w6, 0);
+		ret = optee->spci.ops->sync_msg_send(dst, w3, w4, w5, w6, w7);
 
 		if (ret.func) {
 			pr_err("ret.func %d\n", (int)ret.func);
@@ -743,7 +743,8 @@ static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 
 		might_sleep();
 		w6 = ret.arg6;
-		optee_handle_spci_rpc(ctx, ret.arg4, ret.arg5, &w6, ret.arg7);
+		w7 = ret.arg7;
+		optee_handle_spci_rpc(ctx, ret.arg4, ret.arg5, &w6, &w7);
 		w4 = OPTEE_SPCI_YIELDING_CALL_RESUME;
 		w5 = ret.arg5;
 	}
@@ -761,7 +762,7 @@ done:
 int optee_spci_do_call_with_arg(struct tee_context *ctx, struct tee_shm *shm)
 {
 	return optee_spci_yielding_call(ctx, OPTEE_SPCI_YIELDING_CALL_WITH_ARG,
-					shm->sec_world_id, 0);
+					shm->sec_world_id, 0, 1);
 }
 
 int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
@@ -780,8 +781,7 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	if (rc)
 		return rc;
 
-	rc = optee->spci.ops->mem_share(tee_shm_get_page_offset(shm), 0,
-					&mem_attr, 1, pages, num_pages,
+	rc = optee->spci.ops->mem_share(0, 0, &mem_attr, 1, pages, num_pages,
 					&global_handle);
 	if (rc) {
 		if (rc == SPCI_NO_MEMORY)
@@ -794,6 +794,11 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 		optee->spci.ops->mem_reclaim(global_handle, 0);
 		return rc;
 	}
+
+	/*
+	 * TODO use OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM if
+	 * hm->num_pages > U16_MAX.
+	 */
 
 	shm->sec_world_id = global_handle;
 
@@ -811,7 +816,7 @@ int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
 
 	rc = optee_spci_yielding_call(ctx,
 				      OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM,
-				      global_handle, 0);
+				      global_handle, 0, 0);
 	if (rc)
 		pr_err("OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM id 0x%x rc %d\n",
 		       global_handle, rc);

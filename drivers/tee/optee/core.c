@@ -285,16 +285,14 @@ static void from_msg_param_spci_mem(struct optee *optee, struct tee_param *p,
 	struct tee_shm *shm = NULL;
 
 	p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT +
-		  attr - OPTEE_MSG_ATTR_TYPE_RMEM_INPUT;
-	p->u.memref.size = mp->u.rmem.size;
-	shm = optee_shm_from_spci_handle(optee, mp->u.rmem.shm_ref);
-	if (shm) {
-		p->u.memref.shm_offs = mp->u.rmem.offs;
-		p->u.memref.shm = shm;
-	} else {
+		  attr - OPTEE_MSG_ATTR_TYPE_SMEM_INPUT;
+	p->u.memref.size = mp->u.smem.size;
+	shm = optee_shm_from_spci_handle(optee, mp->u.smem.global_id);
+	p->u.memref.shm = shm;
+	if (shm)
+		p->u.memref.shm_offs = mp->u.smem.offs;
+	else
 		p->u.memref.shm_offs = 0;
-		p->u.memref.shm = NULL;
-	}
 }
 
 /**
@@ -327,9 +325,9 @@ static int optee_spci_from_msg_param(struct optee *optee,
 		case OPTEE_MSG_ATTR_TYPE_VALUE_INOUT:
 			from_msg_param_value(p, attr, mp);
 			break;
-		case OPTEE_MSG_ATTR_TYPE_RMEM_INPUT:
-		case OPTEE_MSG_ATTR_TYPE_RMEM_OUTPUT:
-		case OPTEE_MSG_ATTR_TYPE_RMEM_INOUT:
+		case OPTEE_MSG_ATTR_TYPE_SMEM_INPUT:
+		case OPTEE_MSG_ATTR_TYPE_SMEM_OUTPUT:
+		case OPTEE_MSG_ATTR_TYPE_SMEM_INOUT:
 			from_msg_param_spci_mem(optee, p, attr, mp);
 			break;
 		default:
@@ -342,15 +340,33 @@ static int optee_spci_from_msg_param(struct optee *optee,
 static int to_msg_param_spci_mem(struct optee_msg_param *mp,
 				 const struct tee_param *p)
 {
-	mp->attr = OPTEE_MSG_ATTR_TYPE_RMEM_INPUT + p->attr -
+	struct tee_shm *shm = p->u.memref.shm;
+
+	mp->attr = OPTEE_MSG_ATTR_TYPE_SMEM_INPUT + p->attr -
 		   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
 
-	if (p->u.memref.shm)
-		mp->u.rmem.shm_ref = p->u.memref.shm->sec_world_id;
-	else
-		mp->u.rmem.shm_ref = 0;
-	mp->u.rmem.size = p->u.memref.size;
-	mp->u.rmem.offs = p->u.memref.shm_offs;
+	if (shm) {
+		size_t page_count = shm->num_pages;
+
+		mp->u.smem.offs = p->u.memref.shm_offs;
+		mp->u.smem.internal_offs = shm->offset;
+		if (!page_count)
+			page_count = roundup(shm->size, PAGE_SIZE) / PAGE_SIZE;
+		/*
+		 * If the page count is too large for the page_count field
+		 * it can't be represented here. Set it to 0 instead to
+		 * indicate that this shared memory object is supposed to
+		 * have been pre-registered.
+		 */
+		if (page_count >= U16_MAX)
+			page_count = 0;
+
+		mp->u.smem.page_count = page_count;
+		mp->u.smem.global_id = shm->sec_world_id;
+	} else {
+		memset(&mp->u, 0, sizeof(mp->u));
+	}
+	mp->u.smem.size = p->u.memref.size;
 	return 0;
 }
 
