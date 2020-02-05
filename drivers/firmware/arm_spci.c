@@ -17,6 +17,8 @@
 #include <linux/of_platform.h>
 #include <linux/module.h>
 #include <linux/mm.h>
+#include <linux/mutex.h>
+#include <linux/slab.h>
 
 
 static DEFINE_MUTEX(rx_lock);
@@ -288,11 +290,72 @@ static spci_sp_id_t spci_id_get(void)
 		return id_get_return.arg2 & 0xffff;
 }
 
+static int spci_partition_info_get(uint32_t uuid0, uint32_t uuid1,
+				     uint32_t uuid2, uint32_t uuid3,
+				     struct spci_partition_info **buffer)
+{
+	int rc = 0;
+	uint32_t count;
+	struct spci_partition_info *info =
+		(struct spci_partition_info *) page_address(rx_buffer);
+	struct arm_smcccv1_2_return partition_info_get_return;
+
+	/* Disallow use of the NULL ID. */
+	if (!(uuid0 | uuid1 | uuid2 | uuid3))
+		return -ENXIO;
+
+	mutex_lock(&rx_lock);
+	partition_info_get_return = arm_spci_smccc(SPCI_PARTITION_INFO_GET_32,
+						   uuid0, uuid1, uuid2, uuid3,
+						   0, 0, 0);
+
+	if (partition_info_get_return.func == SPCI_ERROR_32) {
+		switch (partition_info_get_return.arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			rc = -ENXIO;
+			goto err;
+		case SPCI_NO_MEMORY:
+			rc = -ENOMEM;
+			goto err;
+		case SPCI_NOT_SUPPORTED:
+			rc = -ENODEV;
+			goto err;
+		default:
+			panic("%s: Unhandled return code (%lld)\n", __func__,
+			      partition_info_get_return.arg2);
+		}
+	}
+
+	count = partition_info_get_return.arg2;
+
+	/* Allocate and copy the info structs.
+	 * Client is responsible for freeing.
+	 */
+	*buffer = kzalloc(sizeof(struct spci_partition_info) * count,
+			  GFP_KERNEL);
+	if (*buffer == NULL) {
+		rc = -ENOMEM;
+		goto err;
+	}
+	memcpy(*buffer, info, sizeof(struct spci_partition_info) * count);
+
+	rc = spci_rx_release();
+	if (rc)
+		panic("%s: Unhandled return code (%lld)\n", __func__, rc);
+
+	rc = count;
+err:
+	mutex_unlock(&rx_lock);
+
+	return rc;
+}
+
 static struct spci_ops spci_ops = {
 	.async_msg_send = spci_msg_send,
 	.sync_msg_send = spci_msg_send_direct_req,
 	.mem_share = spci_share_memory,
 	.mem_reclaim = spci_memory_reclaim,
+	.partition_info_get = spci_partition_info_get,
 };
 
 struct spci_ops *get_spci_ops(void)

@@ -11,6 +11,7 @@
 
 #define SPCI_RXTX_MAP_32              0x84000066
 
+#define SPCI_PARTITION_INFO_GET_32    0x84000068
 #define SPCI_ID_GET_32                0x84000069
 
 #define SPCI_MSG_SEND_32              0x8400006E
@@ -84,6 +85,22 @@ struct spci_mem_region {
 	struct spci_mem_region_attributes attributes[];
 };
 
+struct spci_partition_info {
+		/** The ID of the VM the information is about. */
+		spci_sp_id_t id;
+		/**
+		 * The number of execution contexts implemented by the
+		 * partition.
+		 */
+		uint16_t execution_context;
+		/**
+		 * The Partition's properties, e.g. supported messaging
+		 * methods
+		 */
+		uint32_t partition_properties;
+};
+
+
 /**
  * struct spci_ops - represents the various SPCI protocol operations
  * available for an SCPI endpoint.
@@ -128,6 +145,24 @@ struct spci_ops {
 	 * (error code).
 	 */
 	int (*mem_reclaim)(u32 global_handle, bool clear_memory);
+	/**
+	 * Returns information on a sub-set of partitions within a system
+	 * identified by a UUID.
+	 * Params:
+	 *  - uuid0-3: The 128 bit UUID of the desired partition(s) represented
+	 *              as 4 32 bit uints in form: uuid0-uuid1-uuid2-uuid3.
+	 *  - spci_partition_info**: A pointer to an array of
+	 *	                     `spci_parition_info` structs that will be
+	 *	                     allocated and populated with the
+	 *	                     discovered partitions information. The
+	 *	                     caller is responsible for freeing the
+	 *	                     memory allocated by the SPCI driver.
+	 * Return: The number of discovered partitions in the system and the
+	 *	   length of the array of spci_partition_info structs,
+	 *	   otherwise a negative value (error code).
+	 */
+	int (*partition_info_get)(u32 uuid0, u32 uuid1, u32 uuid2, u32 uuid3,
+				   struct spci_partition_info**);
 };
 
 #if IS_REACHABLE(CONFIG_ARM_SPCI_TRANSPORT)
