@@ -153,12 +153,12 @@ int spci_share_memory(u32 tag, u32 flags,
 	u32 length;
 	int rc = 0;
 
+	/* Lock access to the TX Buffer before populating. */
+	mutex_lock(&tx_lock);
 	mem_region = (struct spci_mem_region *)page_address(tx_buffer);
 
 	mem_region->flags = flags;
 	mem_region->tag = tag;
-
-
 
 	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
 
@@ -240,6 +240,7 @@ int spci_share_memory(u32 tag, u32 flags,
 			goto err;
 		}
 	}
+	mutex_unlock(&tx_lock);
 
 	*global_handle = smccc_return.arg2;
 err:
