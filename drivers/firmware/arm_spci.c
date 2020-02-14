@@ -138,6 +138,25 @@ static inline u32 compute_region_length(u32 num_constituents,
 		sizeof(struct spci_mem_region_constituent)*num_constituents;
 }
 
+static int spci_rx_release(void)
+{
+	struct arm_smcccv1_2_return rx_release_return;
+
+	rx_release_return = arm_spci_smccc(SPCI_RX_RELEASE_32,
+					      0, 0, 0, 0, 0, 0, 0);
+
+	if (rx_release_return.func  == SPCI_ERROR_32) {
+		switch (rx_release_return.arg2) {
+		case SPCI_DENIED:
+			return -EAGAIN;
+		default:
+			panic("%s: Unhandled return code (%lld)\n", __func__,
+			      rx_release_return.arg2);
+		}
+	}
+	return 0;
+}
+
 /*
  * Share set of pages with a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
