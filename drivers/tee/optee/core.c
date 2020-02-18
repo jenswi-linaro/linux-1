@@ -25,6 +25,7 @@
 #include "shm_pool.h"
 
 #define DRIVER_NAME "optee"
+#define SUPPORTED_OPTEE_PARTITIONS 1
 
 #define OPTEE_SHM_NUM_PRIV_PAGES	CONFIG_OPTEE_SHM_NUM_PRIV_PAGES
 
@@ -992,8 +993,10 @@ static struct optee *optee_probe_spci(void)
 	struct tee_device *teedev = NULL;
 	struct spci_ops *spci_ops = NULL;
 	struct optee *optee = NULL;
+	struct spci_partition_info *partition_info = NULL;
 	u32 spci_dst = 0;
 	u32 sec_caps = 0;
+	int count = 0;
 	int rc = 0;
 
 	spci_ops = get_spci_ops();
@@ -1001,15 +1004,31 @@ static struct optee *optee_probe_spci(void)
 		pr_warn("failed \"method\" init: spci\n");
 		return ERR_PTR(-ENOENT);
 	}
+	/* Use OPTEE UUID to retrieve partition ID. */
+        count = spci_ops->partition_info_get(OPTEE_MSG_OS_OPTEE_UUID_0,
+					     OPTEE_MSG_OS_OPTEE_UUID_1,
+					     OPTEE_MSG_OS_OPTEE_UUID_2,
+					     OPTEE_MSG_OS_OPTEE_UUID_3,
+					     &partition_info);
 
+	/* If count is negative propergate the error code. */
+	if (count < 0) {
+		return ERR_PTR(count);
+	}
 	/*
-	 * TODO: Update the destination ID (first argument). Sending the
-	 * message to VM with id 0x8001 as this is the convention being
-	 * used in Hafnium.  The Hafnium prototype considers that ids >
-	 * 0x7fff are on the secure world, whereas the remainder are in the
-	 * normal world. Need to revisit this.
+	 * If the function returned sucessfully we must ensure to free the
+	 * allocated memory before exiting.
 	 */
-	spci_dst = 0x8001;
+
+	/* Check only a single patition is found.*/
+	/* TODO: Add support for dealing with multiple partitions. */
+	if (count > SUPPORTED_OPTEE_PARTITIONS) {
+		kfree(partition_info);
+		return ERR_PTR(-EINVAL);
+	}
+	spci_dst = partition_info[0].id;
+	kfree(partition_info);
+
 	if (!optee_spci_api_is_compatbile(spci_ops, spci_dst))
 		return ERR_PTR(-EINVAL);
 
@@ -1065,6 +1084,8 @@ static struct optee *optee_probe_spci(void)
 	optee_supp_init(&optee->supp);
 
 	return optee;
+
+
 err:
 	/*
 	 * tee_device_unregister() is safe to call even if the
