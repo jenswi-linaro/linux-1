@@ -113,6 +113,36 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	return ret;
 }
 
+static int spci_share_fragment_tx(u32 page_count,
+	u32 fragment_len, u32 total_len, u32 cookie,
+	struct arm_smcccv1_2_return *smccc_return)
+{
+
+	*smccc_return =
+		arm_spci_smccc(SPCI_MEM_SHARE_64, 0, page_count, fragment_len,
+			total_len, cookie, 0, 0);
+
+
+	if (smccc_return->func == SPCI_ERROR_32) {
+		switch (smccc_return->arg2) {
+		case SPCI_INVALID_PARAMETERS:
+			return -ENXIO;
+		case SPCI_DENIED:
+			return -EIO;
+		case SPCI_NO_MEMORY:
+			return -ENOMEM;
+		case SPCI_RETRY:
+			return -EAGAIN;
+		default:
+			pr_warn("%s: Unknown Error code %x\n", __func__,
+				smccc_return->arg2);
+			return -EIO;
+		}
+	}
+
+	return 0;
+}
+
 static inline u16 set_mem_attributes(enum spci_mem_permission perm,
 	enum spci_mem_type type)
 {
@@ -121,12 +151,12 @@ static inline u16 set_mem_attributes(enum spci_mem_permission perm,
 
 static inline u32 compute_constituent_offset(u32 num_attributes)
 {
-	u32 constituent_offset = sizeof(struct spci_mem_region) +
-		sizeof(struct spci_mem_region_attributes)*num_attributes;
+	u32 constituent_offset = offsetof(struct spci_mem_region,
+		attributes[num_attributes]);
 
 	/* ensure constituents are 8 byte aligned. */
 	if (constituent_offset & 0x7)
-		return (constituent_offset & (~(uintptr_t)0x7)) + 0x8;
+		return (constituent_offset & (~(u32)0x7)) + 0x8;
 
 	return constituent_offset;
 }
@@ -157,14 +187,35 @@ static int spci_rx_release(void)
 	return 0;
 }
 
+static u32 spci_count_total_constituents(struct page *pages[],
+	const u32 num_pages)
+{
+	int index;
+	u32 num_constituents = 1;
+	phys_addr_t temp_address = page_to_phys(pages[0]);
+
+	for (index = 1; index < num_pages; index++) {
+
+		phys_addr_t address = page_to_phys(pages[index]);
+
+		if (address != temp_address + SPCI_BASE_GRANULE_SIZE) {
+			num_constituents++;
+		}
+		temp_address = address;
+	}
+
+	return num_constituents;
+}
+
+
 /*
- * Share set of pages with a set of pages with a list of destination endpoints.
+ * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
  */
 int spci_share_memory(u32 tag, u32 flags,
 	struct spci_mem_region_attributes *attrs,
 	u32 num_attrs, struct page *pages[],
-	u32 num_pages, u32 *global_handle)
+	const u32 num_pages, u32 *global_handle)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
@@ -172,8 +223,13 @@ int spci_share_memory(u32 tag, u32 flags,
 	struct spci_mem_region_constituent *constituents;
 	struct arm_smcccv1_2_return smccc_return;
 	u32 length;
+	u32 total_num_constituents;
+	u32 total_region_len;
+	u32 fragment_len = 0;
+	u32 local_num_pages = num_pages;
+	u32 cookie = 0;
 	int rc = 0;
-
+	
 	/* Lock access to the TX Buffer before populating. */
 	mutex_lock(&tx_lock);
 	mem_region = (struct spci_mem_region *)page_address(tx_buffer);
@@ -182,6 +238,7 @@ int spci_share_memory(u32 tag, u32 flags,
 	mem_region->tag = tag;
 
 	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
+	fragment_len = mem_region->constituent_offset;
 
 	/* Ensure attribute description fits withing the Tx buffer. */
 	if (mem_region->constituent_offset >= SPCI_BASE_GRANULE_SIZE) {
@@ -190,7 +247,10 @@ int spci_share_memory(u32 tag, u32 flags,
 	}
 
 	constituents = (struct spci_mem_region_constituent *)
-		(((uintptr_t)mem_region) + mem_region->constituent_offset);
+		(((void *)mem_region) + mem_region->constituent_offset);
+
+	total_num_constituents = spci_count_total_constituents(pages, num_pages);
+	total_region_len = compute_region_length(total_num_constituents, num_attrs);
 
 	for (index = 0; index < num_attrs; index++) {
 		mem_region->attributes[index].receiver = attrs[index].receiver;
@@ -201,9 +261,13 @@ int spci_share_memory(u32 tag, u32 flags,
 
 	/* Fill in the constituents. */
 	constituents[0].address = page_to_phys(pages[0]);
+
 	pr_devel("arm_spci mem_share pa=%#X\n", constituents[0].address);
+
 	constituents[0].page_count = 1;
 	num_constituents = 1;
+	fragment_len += sizeof(struct spci_mem_region_constituent);
+
 	for (index = 1; index < num_pages; index++) {
 
 		phys_addr_t address = page_to_phys(pages[index]);
@@ -214,18 +278,59 @@ int spci_share_memory(u32 tag, u32 flags,
 			SPCI_BASE_GRANULE_SIZE)) {
 
 			/*
-			 * Ensure the constituent is fully within the Tx
-			 * buffer boundary.
+			 * If current fragment size equal Tx size trigger fragment
+			 * transfer.
 			 */
-			if (compute_region_length(num_constituents + 1,
-				num_attrs) > SPCI_BASE_GRANULE_SIZE) {
-				rc = -ENXIO;
+			if (fragment_len == SPCI_BASE_GRANULE_SIZE) {
+
+				/*
+				 * XXX: Executing with tx_lock acquired until all fragments are
+				 * transfered. So cookie = 1 will always be unique.
+				 */
+				if (fragment_len != total_region_len)
+				{
+					cookie = 1;
+				}
+
+				/* Transmit fragment. */
+				rc = spci_share_fragment_tx(local_num_pages,
+					SPCI_BASE_GRANULE_SIZE, total_region_len, cookie,
+					&smccc_return);
+
+				if (rc < 0)
+				{
+					goto err;
+				}
+
+
+				/* total_region_len MBZ after the first invocation. */
+				total_region_len = 0;
+				/* local_num_pages MBZ after the first invocation. */
+				local_num_pages =0;
+
+				num_constituents = 0;
+				constituents = (struct spci_mem_region_constituent *)mem_region;
+				fragment_len = 0;
+			}
+
+			/*
+			 * Detect if any part of the constituent region surpasses the Tx
+			 * region.
+			 */
+			if (((uintptr_t) &constituents[num_constituents + 1])
+				- (uintptr_t)mem_region > SPCI_BASE_GRANULE_SIZE)
+			{
+				pr_err("%s: memory region fragment greater that the Tx buffer",
+					 __func__);
+				rc = -EFAULT;
 				goto err;
 			}
 
 			constituents[num_constituents].address = address;
 			constituents[num_constituents].page_count = 1;
 			num_constituents++;
+			fragment_len += sizeof(struct spci_mem_region_constituent);
+
 		} else {
 			constituents[num_constituents - 1].page_count++;
 		}
@@ -234,34 +339,9 @@ int spci_share_memory(u32 tag, u32 flags,
 	/* Write the SPCI memory region descriptor onto the Tx buffer. */
 	mem_region->constituent_count = num_constituents;
 
-	length = compute_region_length(num_constituents, num_attrs);
-
-	smccc_return =
-		arm_spci_smccc(SPCI_MEM_SHARE_64, 0, 0, length, length, 0, 0,
-			0);
-
-	if (smccc_return.func == SPCI_ERROR_32) {
-		switch (smccc_return.arg2) {
-		case SPCI_INVALID_PARAMETERS:
-			rc = -ENXIO;
-			goto err;
-		case SPCI_DENIED:
-			rc = -EIO;
-			goto err;
-		case SPCI_NO_MEMORY:
-			rc = -ENOMEM;
-			goto err;
-		case SPCI_RETRY:
-			rc = -EAGAIN;
-			goto err;
-		default:
-			pr_warn("%s: Unknown Error code %x\n", __func__,
-				smccc_return.arg2);
-			rc = -EIO;
-			goto err;
-		}
-	}
-	mutex_unlock(&tx_lock);
+	rc = spci_share_fragment_tx(local_num_pages,
+		SPCI_BASE_GRANULE_SIZE, total_region_len, cookie,
+		&smccc_return);
 
 	*global_handle = smccc_return.arg2;
 err:
