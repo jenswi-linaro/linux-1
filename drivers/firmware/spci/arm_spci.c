@@ -208,6 +208,48 @@ static u32 spci_count_total_constituents(struct page *pages[],
 }
 
 
+#define MAX_COOKIE 10
+static bool cookie_tracker[MAX_COOKIE] = {0};
+
+/** 
+ * Obtain a unique cookie to be used in the spci_mem_share operations.
+ * Must only be called with tx_lock acquired.
+ *
+ * A 0 return signals failure.
+ */
+static inline u32 get_mem_share_cookie()
+{
+
+	u32 index;
+
+	for (index=0; index<MAX_COOKIE; index++)
+	{
+		if (cookie_tracker[index] == 0)	{
+			cookie_tracker[index] = 1;
+			return index+1;
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * Put a unique cookie used for spci_mem_share operations.
+ */ 
+static inline bool put_mem_share_cookie(u32 cookie)
+{
+
+	if (cookie_tracker[cookie] == 1)
+	{
+		pr_err("Tried to erroneously put cookie %d\n", cookie);
+		return false;
+	}
+
+	cookie_tracker[cookie] = 0;
+
+	return true;
+}
+
 /*
  * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
@@ -224,12 +266,13 @@ int spci_share_memory(u32 tag, u32 flags,
 	struct arm_smcccv1_2_return smccc_return;
 	u32 length;
 	u32 total_num_constituents;
-	u32 total_region_len;
+	u32 region_len;
+	u32 efemeral_region_len;
 	u32 fragment_len = 0;
 	u32 local_num_pages = num_pages;
 	u32 cookie = 0;
 	int rc = 0;
-	
+
 	/* Lock access to the TX Buffer before populating. */
 	mutex_lock(&tx_lock);
 	mem_region = (struct spci_mem_region *)page_address(tx_buffer);
@@ -250,7 +293,8 @@ int spci_share_memory(u32 tag, u32 flags,
 		(((void *)mem_region) + mem_region->constituent_offset);
 
 	total_num_constituents = spci_count_total_constituents(pages, num_pages);
-	total_region_len = compute_region_length(total_num_constituents, num_attrs);
+	mem_region->constituent_count = total_num_constituents;
+	region_len = compute_region_length(total_num_constituents, num_attrs);
 
 	for (index = 0; index < num_attrs; index++) {
 		mem_region->attributes[index].receiver = attrs[index].receiver;
@@ -268,12 +312,17 @@ int spci_share_memory(u32 tag, u32 flags,
 	num_constituents = 1;
 	fragment_len += sizeof(struct spci_mem_region_constituent);
 
+	efemeral_region_len = region_len;
 	for (index = 1; index < num_pages; index++) {
 
 		phys_addr_t address = page_to_phys(pages[index]);
 
 		pr_devel("arm_spci mem_share pa=%#X\n", address);
 
+		/*
+		 * Address not contiguous with current constituent,
+		 * create new constituent.
+		 */
 		if (address != (constituents[num_constituents - 1].address +
 			SPCI_BASE_GRANULE_SIZE)) {
 
@@ -285,33 +334,52 @@ int spci_share_memory(u32 tag, u32 flags,
 
 				/*
 				 * XXX: Executing with tx_lock acquired until all fragments are
-				 * transfered. So cookie = 1 will always be unique.
+				 * transferred.
 				 */
-				if (fragment_len != total_region_len)
+				if (efemeral_region_len)
 				{
-					cookie = 1;
+					if(cookie!=0) {
+						panic("initialized mem_share cookie");
+					}
+
+					cookie = get_mem_share_cookie();
+
+					if(!cookie)
+					{
+						pr_err("%s: failed to get a valid mem_share cookie\n",
+							__func__);
+
+						return -ENXIO;
+					}
 				}
 
 				/* Transmit fragment. */
 				rc = spci_share_fragment_tx(local_num_pages,
-					SPCI_BASE_GRANULE_SIZE, total_region_len, cookie,
+					fragment_len, efemeral_region_len, cookie,
 					&smccc_return);
+
+				/* Allow another thread to access the tx buffer. */
+				mutex_unlock(&tx_lock);
 
 				if (rc < 0)
 				{
-					goto err;
+					return rc;
 				}
 
-
-				/* total_region_len MBZ after the first invocation. */
-				total_region_len = 0;
+				/* efemeral_region_len MBZ after the first invocation. */
+				efemeral_region_len = 0;
 				/* local_num_pages MBZ after the first invocation. */
 				local_num_pages =0;
 
 				num_constituents = 0;
 				constituents = (struct spci_mem_region_constituent *)mem_region;
 				fragment_len = 0;
+
+				/* Regain exclusive access to the Tx buffer. */
+				mutex_lock(&tx_lock);
 			}
+
+
 
 			/*
 			 * Detect if any part of the constituent region surpasses the Tx
@@ -332,16 +400,28 @@ int spci_share_memory(u32 tag, u32 flags,
 			fragment_len += sizeof(struct spci_mem_region_constituent);
 
 		} else {
+			/* Address contiguous, increment attribute page count. */
 			constituents[num_constituents - 1].page_count++;
 		}
 	}
+
 
 	/* Write the SPCI memory region descriptor onto the Tx buffer. */
 	mem_region->constituent_count = num_constituents;
 
 	rc = spci_share_fragment_tx(local_num_pages,
-		SPCI_BASE_GRANULE_SIZE, total_region_len, cookie,
+		fragment_len, efemeral_region_len, cookie,
 		&smccc_return);
+
+	/* If unique cookie was obtained, put it back. */
+	if (cookie)
+	{
+		if(!put_mem_share_cookie(cookie))
+		{
+			panic("failed to put cookie %d\n", cookie);
+		}
+		cookie = 0;
+	}
 
 	*global_handle = smccc_return.arg2;
 err:
