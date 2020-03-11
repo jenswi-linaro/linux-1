@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
@@ -772,6 +773,7 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	u32 global_handle = 0;
 	u32 rc = 0;
+	struct sg_table sgt;
 	struct spci_mem_region_attributes mem_attr = {
 		.receiver = optee->spci.dst,
 		.attrs = 0x5b,
@@ -781,8 +783,12 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	if (rc)
 		return rc;
 
-	rc = optee->spci.ops->mem_share(0, 0, &mem_attr, 1, pages, num_pages,
-					&global_handle);
+	sg_alloc_table_from_pages(&sgt, pages,
+			      num_pages, 0,
+			      num_pages * 4096, GFP_KERNEL);
+
+	rc = optee->spci.ops->mem_share(0, 0, &mem_attr, 1, sgt.sgl,
+		&global_handle);
 	if (rc) {
 		if (rc == SPCI_NO_MEMORY)
 			return -ENOMEM;
