@@ -21,6 +21,7 @@
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/scatterlist.h>
 
 enum message_t
 {
@@ -112,11 +113,17 @@ long test_share_multi_fragment()
 		// have a single page and consume the maximum space possible in the
 		// memory region descriptor.
 		pages[index] = virt_to_page(mem_region + (index*4096*2));
+
+		//sg_set_page(sg, cur_page, 4096, 0);
 	}
+	struct sg_table sgt;
+	sg_alloc_table_from_pages(&sgt, pages,
+			      page_entries, 0,
+			      page_entries*4096, GFP_KERNEL);
 
 	pr_info("Start mem share %s:%d\n", __FILE__, __LINE__);
 	// tag, flags, *attrs, num_attrs, *pages[], num_pages, *global_handle
-	retVal = ops->mem_share(0, 1, attributes, 1, pages, page_entries, &handle);
+	retVal = ops->mem_share(0, 1, attributes, 1, sgt.sgl, &handle);
 
 	if(retVal)
 	{
