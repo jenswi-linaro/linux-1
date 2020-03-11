@@ -35,7 +35,7 @@
 
 #define SPCI_BASE_GRANULE_SIZE 4096
 
-struct page;
+struct scatterlist;
 
 enum spci_mem_permission {
 	SPCI_MEM_R,
@@ -120,9 +120,7 @@ struct spci_ops {
 	 *  - attrs[]: Array of destination VMs and permissions with which the
 	 *     Stage-2 mappings are set.
 	 *  - num_attrs: Count of elements pointed to by attrs.
-	 *  - pages[]: Array of pointers to struct page representing the pages
-	 *     to be shared.
-	 *  - num_pages: Count of elements pointed to by pages.
+	 *  - sg: scatter list holding the pages to be shared.
 	 *  - global_handle: A system-wide unique handle referring to the shared
 	 *     set of physical pages being shared.
 	 *
@@ -131,8 +129,8 @@ struct spci_ops {
 	 */
 	int (*mem_share)(u32 tag, u32 flags,
 			  struct spci_mem_region_attributes attrs[],
-			  u32 num_attrs, struct page *pages[],
-			  u32 num_pages, u32 *global_handle);
+			  u32 num_attrs, struct scatterlist *sg,
+			  u32 *global_handle);
 	/**
 	 * Reclaims a memory region previously registered with the SPCI
 	 *  implementation.

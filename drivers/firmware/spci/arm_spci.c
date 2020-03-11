@@ -19,6 +19,7 @@
 #include <linux/mm.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/scatterlist.h>
 
 
 static DEFINE_MUTEX(rx_lock);
@@ -187,22 +188,13 @@ static int spci_rx_release(void)
 	return 0;
 }
 
-static u32 spci_count_total_constituents(struct page *pages[],
-	const u32 num_pages)
+static u32 spci_count_total_constituents(struct scatterlist *sg)
 {
-	int index;
-	u32 num_constituents = 1;
-	phys_addr_t temp_address = page_to_phys(pages[0]);
+	u32 num_constituents = 0;
 
-	for (index = 1; index < num_pages; index++) {
-
-		phys_addr_t address = page_to_phys(pages[index]);
-
-		if (address != temp_address + SPCI_BASE_GRANULE_SIZE) {
-			num_constituents++;
-		}
-		temp_address = address;
-	}
+	do {
+		num_constituents += 1;
+	} while((sg = sg_next(sg)));
 
 	return num_constituents;
 }
@@ -250,26 +242,35 @@ static inline bool put_mem_share_cookie(u32 cookie)
 	return true;
 }
 
+static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
+{
+	uint32_t num_pages = 0;
+	do {
+		num_pages += sg->length/PAGE_SIZE;
+	} while ((sg = sg_next(sg)));
+
+	return num_pages;
+}
+
 /*
  * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
  */
 int spci_share_memory(u32 tag, u32 flags,
 	struct spci_mem_region_attributes *attrs,
-	u32 num_attrs, struct page *pages[],
-	const u32 num_pages, u32 *global_handle)
+	u32 num_attrs, struct scatterlist *sg,
+	u32 *global_handle)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
 	u32 num_constituents;
 	struct spci_mem_region_constituent *constituents;
 	struct arm_smcccv1_2_return smccc_return;
-	u32 length;
 	u32 total_num_constituents;
 	u32 region_len;
-	u32 efemeral_region_len;
-	u32 fragment_len = 0;
-	u32 local_num_pages = num_pages;
+	u32 ephemeral_region_len;
+	u32 fragment_len = sizeof(struct spci_mem_region);
+	u32 local_num_pages = spci_get_num_pages_sg(sg);
 	u32 cookie = 0;
 	int rc = 0;
 
@@ -279,6 +280,8 @@ int spci_share_memory(u32 tag, u32 flags,
 
 	mem_region->flags = flags;
 	mem_region->tag = tag;
+
+	mem_region->constituent_count = sg_nents(sg);
 
 	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
 	fragment_len = mem_region->constituent_offset;
@@ -292,7 +295,8 @@ int spci_share_memory(u32 tag, u32 flags,
 	constituents = (struct spci_mem_region_constituent *)
 		(((void *)mem_region) + mem_region->constituent_offset);
 
-	total_num_constituents = spci_count_total_constituents(pages, num_pages);
+	total_num_constituents = spci_count_total_constituents(sg);
+
 	mem_region->constituent_count = total_num_constituents;
 	region_len = compute_region_length(total_num_constituents, num_attrs);
 
@@ -303,114 +307,89 @@ int spci_share_memory(u32 tag, u32 flags,
 	}
 	mem_region->attribute_count = num_attrs;
 
-	/* Fill in the constituents. */
-	constituents[0].address = page_to_phys(pages[0]);
+	num_constituents = 0;
+	ephemeral_region_len = region_len;
 
-	pr_devel("arm_spci mem_share pa=%#X\n", constituents[0].address);
+	do {
+		phys_addr_t address = sg_phys(sg);
 
-	constituents[0].page_count = 1;
-	num_constituents = 1;
-	fragment_len += sizeof(struct spci_mem_region_constituent);
-
-	efemeral_region_len = region_len;
-	for (index = 1; index < num_pages; index++) {
-
-		phys_addr_t address = page_to_phys(pages[index]);
+		/*
+		 * Detect if any part of the constituent region surpasses the Tx
+		 * region.
+		 */
+		if (((void *) &constituents[num_constituents])
+			- (void *)mem_region > SPCI_BASE_GRANULE_SIZE)
+		{
+			pr_err("%s: memory region fragment greater that the Tx buffer",
+				 __func__);
+			rc = -EFAULT;
+			goto err;
+		}
 
 		pr_devel("arm_spci mem_share pa=%#X\n", address);
 
+		constituents[num_constituents].address = address;
+		constituents[num_constituents].page_count = sg->length/PAGE_SIZE;
+		num_constituents++;
+		fragment_len += sizeof(struct spci_mem_region_constituent);
+
 		/*
-		 * Address not contiguous with current constituent,
-		 * create new constituent.
+		 * If current fragment size equal Tx size trigger fragment
+		 * transfer.
 		 */
-		if (address != (constituents[num_constituents - 1].address +
-			SPCI_BASE_GRANULE_SIZE)) {
+		if (fragment_len == SPCI_BASE_GRANULE_SIZE) {
 
 			/*
-			 * If current fragment size equal Tx size trigger fragment
-			 * transfer.
+			 * XXX: Executing with tx_lock acquired until all fragments are
+			 * transferred.
 			 */
-			if (fragment_len == SPCI_BASE_GRANULE_SIZE) {
-
-				/*
-				 * XXX: Executing with tx_lock acquired until all fragments are
-				 * transferred.
-				 */
-				if (efemeral_region_len)
-				{
-					if(cookie!=0) {
-						panic("initialized mem_share cookie");
-					}
-
-					cookie = get_mem_share_cookie();
-
-					if(!cookie)
-					{
-						pr_err("%s: failed to get a valid mem_share cookie\n",
-							__func__);
-
-						return -ENXIO;
-					}
-				}
-
-				/* Transmit fragment. */
-				rc = spci_share_fragment_tx(local_num_pages,
-					fragment_len, efemeral_region_len, cookie,
-					&smccc_return);
-
-				/* Allow another thread to access the tx buffer. */
-				mutex_unlock(&tx_lock);
-
-				if (rc < 0)
-				{
-					return rc;
-				}
-
-				/* efemeral_region_len MBZ after the first invocation. */
-				efemeral_region_len = 0;
-				/* local_num_pages MBZ after the first invocation. */
-				local_num_pages =0;
-
-				num_constituents = 0;
-				constituents = (struct spci_mem_region_constituent *)mem_region;
-				fragment_len = 0;
-
-				/* Regain exclusive access to the Tx buffer. */
-				mutex_lock(&tx_lock);
-			}
-
-
-
-			/*
-			 * Detect if any part of the constituent region surpasses the Tx
-			 * region.
-			 */
-			if (((uintptr_t) &constituents[num_constituents + 1])
-				- (uintptr_t)mem_region > SPCI_BASE_GRANULE_SIZE)
+			if (ephemeral_region_len)
 			{
-				pr_err("%s: memory region fragment greater that the Tx buffer",
-					 __func__);
-				rc = -EFAULT;
-				goto err;
+				if(cookie!=0) {
+					panic("initialized mem_share cookie");
+				}
+
+				cookie = get_mem_share_cookie();
+
+				if(!cookie)
+				{
+					pr_err("%s: failed to get a valid mem_share cookie\n",
+						__func__);
+
+					return -ENXIO;
+				}
 			}
 
-			constituents[num_constituents].address = address;
-			constituents[num_constituents].page_count = 1;
-			num_constituents++;
-			fragment_len += sizeof(struct spci_mem_region_constituent);
+			/* Transmit fragment. */
+			rc = spci_share_fragment_tx(local_num_pages,
+				fragment_len, ephemeral_region_len, cookie,
+				&smccc_return);
 
-		} else {
-			/* Address contiguous, increment attribute page count. */
-			constituents[num_constituents - 1].page_count++;
+			/* Allow another thread to access the tx buffer. */
+			mutex_unlock(&tx_lock);
+
+			if (rc < 0)
+			{
+				return rc;
+			}
+
+			/* ephemeral_region_len MBZ after the first invocation. */
+			ephemeral_region_len = 0;
+			/* local_num_pages MBZ after the first invocation. */
+			local_num_pages =0;
+			constituents = (struct spci_mem_region_constituent *)mem_region;
+			num_constituents = 0;
+			fragment_len = 0;
+
+			/* Regain exclusive access to the Tx buffer. */
+			mutex_lock(&tx_lock);
 		}
-	}
+	} while((sg = sg_next(sg)));
 
 
-	/* Write the SPCI memory region descriptor onto the Tx buffer. */
-	mem_region->constituent_count = num_constituents;
 
 	rc = spci_share_fragment_tx(local_num_pages,
-		fragment_len, efemeral_region_len, cookie,
+		fragment_len, ephemeral_region_len, cookie,
 		&smccc_return);
 
 	/* If unique cookie was obtained, put it back. */
