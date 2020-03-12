@@ -416,10 +416,10 @@ err:
 	return rc;
 }
 
-static int spci_memory_reclaim(spci_mem_handle_t global_handle, bool clear_memory)
-{
+static int spci_memory_reclaim(spci_mem_handle_t global_handle,
+	enum mem_clear_t flags) {
+
 	struct arm_smcccv1_2_return smccc_return;
-	u32 flags = clear_memory ? 0x1 : 0x0;
 
 	smccc_return = arm_spci_smccc(SPCI_MEM_RECLAIM_32, global_handle, flags,
 			     0, 0, 0, 0, 0);

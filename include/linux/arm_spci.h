@@ -150,7 +150,7 @@ struct spci_ops {
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
 	 */
-	int (*mem_reclaim)(spci_mem_handle_t global_handle, bool clear_memory);
+	int (*mem_reclaim)(spci_mem_handle_t global_handle, enum mem_clear_t flags);
 	/**
 	 * Returns information on a sub-set of partitions within a system
 	 * identified by a UUID.
