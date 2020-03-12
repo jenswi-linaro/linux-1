@@ -118,26 +118,34 @@ static int spci_share_fragment_tx(u32 page_count,
 	u32 fragment_len, u32 total_len, u32 cookie,
 	struct arm_smcccv1_2_return *smccc_return)
 {
-
 	*smccc_return =
 		arm_spci_smccc(SPCI_MEM_SHARE_64, 0, page_count, fragment_len,
 			total_len, cookie, 0, 0);
 
+	while (smccc_return->func != SPCI_SUCCESS_32) {
 
-	if (smccc_return->func == SPCI_ERROR_32) {
-		switch (smccc_return->arg2) {
-		case SPCI_INVALID_PARAMETERS:
-			return -ENXIO;
-		case SPCI_DENIED:
-			return -EIO;
-		case SPCI_NO_MEMORY:
-			return -ENOMEM;
-		case SPCI_RETRY:
-			return -EAGAIN;
-		default:
-			pr_warn("%s: Unknown Error code %x\n", __func__,
-				smccc_return->arg2);
-			return -EIO;
+		if (smccc_return->func == SPCI_ERROR_32) {
+			switch (smccc_return->arg2) {
+			case SPCI_INVALID_PARAMETERS:
+				return -ENXIO;
+			case SPCI_DENIED:
+				return -EIO;
+			case SPCI_NO_MEMORY:
+				return -ENOMEM;
+			case SPCI_RETRY:
+				return -EAGAIN;
+			default:
+				pr_warn("%s: Unknown Error code %x\n", __func__,
+					smccc_return->arg2);
+				return -EIO;
+			}
+		}
+
+		if (smccc_return->func == SPCI_MEM_OP_PAUSE_32) {
+			u32 cookie = smccc_return->arg1;
+
+			*smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, cookie,
+				0, 0, 0, 0, 0, 0);
 		}
 	}
 
