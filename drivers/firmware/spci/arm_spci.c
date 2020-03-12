@@ -268,7 +268,7 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	struct spci_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg,
-	spci_mem_handle_t *global_handle)
+	spci_mem_handle_t *global_handle, void *buffer, u32 buffer_size)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
@@ -281,11 +281,23 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	u32 fragment_len = sizeof(struct spci_mem_region);
 	u32 local_num_pages = spci_get_num_pages_sg(sg);
 	u32 cookie = 0;
+	u32 max_fragment_size;
 	int rc = 0;
 
 	/* Lock access to the TX Buffer before populating. */
 	mutex_lock(&tx_lock);
-	mem_region = (struct spci_mem_region *)page_address(tx_buffer);
+	if(buffer!=NULL) {
+		mem_region = (struct spci_mem_region *)buffer;
+		max_fragment_size = buffer_size;
+		if (buffer_size % SPCI_BASE_GRANULE_SIZE)
+		{
+			pr_err("%s: buffer size must be a multiple of 4kiB", __func__);
+			rc = -ENXIO;
+		}
+	} else {
+		mem_region = (struct spci_mem_region *)page_address(tx_buffer);
+		max_fragment_size = SPCI_BASE_GRANULE_SIZE;
+	}
 
 	mem_region->flags = flags;
 	mem_region->tag = tag;
@@ -296,7 +308,7 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	fragment_len = mem_region->constituent_offset;
 
 	/* Ensure attribute description fits withing the Tx buffer. */
-	if (mem_region->constituent_offset >= SPCI_BASE_GRANULE_SIZE) {
+	if (mem_region->constituent_offset >= max_fragment_size) {
 		rc = -ENXIO;
 		goto err;
 	}
@@ -327,7 +339,7 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 		 * region.
 		 */
 		if (((void *) &constituents[num_constituents])
-			- (void *)mem_region > SPCI_BASE_GRANULE_SIZE)
+			- (void *)mem_region > max_fragment_size)
 		{
 			pr_err("%s: memory region fragment greater that the Tx buffer",
 				 __func__);
@@ -346,7 +358,7 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 		 * If current fragment size equal Tx size trigger fragment
 		 * transfer.
 		 */
-		if (fragment_len == SPCI_BASE_GRANULE_SIZE) {
+		if (fragment_len == max_fragment_size) {
 
 			/*
 			 * XXX: Executing with tx_lock acquired until all fragments are
