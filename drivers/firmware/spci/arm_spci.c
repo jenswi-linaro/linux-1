@@ -176,7 +176,7 @@ static int spci_rx_release(void)
 	rx_release_return = arm_spci_smccc(SPCI_RX_RELEASE_32,
 					      0, 0, 0, 0, 0, 0, 0);
 
-	if (rx_release_return.func  == SPCI_ERROR_32) {
+	if (rx_release_return.func == SPCI_ERROR_32) {
 		switch (rx_release_return.arg2) {
 		case SPCI_DENIED:
 			return -EAGAIN;
@@ -185,6 +185,15 @@ static int spci_rx_release(void)
 			      rx_release_return.arg2);
 		}
 	}
+
+	if (rx_release_return.func == SPCI_RX_RELEASE_32) {
+		/*
+		 * SPCI implementation returned SPCI_RX_RELEASE which signals
+		 * the PVM that other VMs need to be scheduled.
+		 */
+		return 1;
+	}
+
 	return 0;
 }
 
@@ -256,10 +265,10 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
  * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
  */
-int spci_share_memory(u32 tag, u32 flags,
+int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	struct spci_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg,
-	u32 *global_handle)
+	spci_mem_handle_t *global_handle)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
@@ -375,6 +384,7 @@ int spci_share_memory(u32 tag, u32 flags,
 
 			/* ephemeral_region_len MBZ after the first invocation. */
 			ephemeral_region_len = 0;
+
 			/* local_num_pages MBZ after the first invocation. */
 			local_num_pages =0;
 			constituents = (struct spci_mem_region_constituent *)mem_region;
@@ -385,8 +395,6 @@ int spci_share_memory(u32 tag, u32 flags,
 			mutex_lock(&tx_lock);
 		}
 	} while((sg = sg_next(sg)));
-
-
 
 	rc = spci_share_fragment_tx(local_num_pages,
 		fragment_len, ephemeral_region_len, cookie,
@@ -408,7 +416,7 @@ err:
 	return rc;
 }
 
-static int spci_memory_reclaim(u32 global_handle, bool clear_memory)
+static int spci_memory_reclaim(spci_mem_handle_t global_handle, bool clear_memory)
 {
 	struct arm_smcccv1_2_return smccc_return;
 	u32 flags = clear_memory ? 0x1 : 0x0;

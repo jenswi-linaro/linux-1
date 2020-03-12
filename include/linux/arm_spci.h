@@ -21,7 +21,6 @@
 #define SPCI_MEM_RECLAIM_32           0x84000077
 
 #define SPCI_MEM_SHARE_64             0xC4000073
-#define SPCI_MEM_RECLAIM_64           0xC4000077
 
 /* SPCI error codes. */
 #define SPCI_SUCCESS            (0)
@@ -61,8 +60,14 @@ enum spci_mem_device_type {
 	SPCI_GRE,
 };
 
+enum mem_clear_t {
+	SPCI_KEEP_MEMORY,
+	SPCI_CLEAR_MEMORY,
+};
 
-/* The type of a SPCI endpoint ID */
+typedef u32 spci_mem_handle_t;
+
+/* The type of an SPCI endpoint ID */
 typedef u16 spci_sp_id_t;
 
 struct spci_mem_region_constituent {
@@ -117,6 +122,8 @@ struct spci_ops {
 	 * Params:
 	 *  - tag: Implementation defined value.
 	 *  - flags:
+	 *   - SPCI_KEEP_MEMORY: DO not clear the memory region;
+	 *   - SPCI_CLEAR_MEMORY: Clear the memory region.
 	 *  - attrs[]: Array of destination VMs and permissions with which the
 	 *     Stage-2 mappings are set.
 	 *  - num_attrs: Count of elements pointed to by attrs.
@@ -127,10 +134,10 @@ struct spci_ops {
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
 	 */
-	int (*mem_share)(u32 tag, u32 flags,
+	int (*mem_share)(u32 tag, enum mem_clear_t flags,
 			  struct spci_mem_region_attributes attrs[],
 			  u32 num_attrs, struct scatterlist *sg,
-			  u32 *global_handle);
+			  spci_mem_handle_t *global_handle);
 	/**
 	 * Reclaims a memory region previously registered with the SPCI
 	 *  implementation.
@@ -143,7 +150,7 @@ struct spci_ops {
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
 	 */
-	int (*mem_reclaim)(u32 global_handle, bool clear_memory);
+	int (*mem_reclaim)(spci_mem_handle_t global_handle, bool clear_memory);
 	/**
 	 * Returns information on a sub-set of partitions within a system
 	 * identified by a UUID.
