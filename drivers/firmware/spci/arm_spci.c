@@ -466,10 +466,6 @@ static int spci_partition_info_get(uint32_t uuid0, uint32_t uuid1,
 		(struct spci_partition_info *) page_address(rx_buffer);
 	struct arm_smcccv1_2_return partition_info_get_return;
 
-	/* Disallow use of the NULL ID. */
-	if (!(uuid0 | uuid1 | uuid2 | uuid3))
-		return -ENXIO;
-
 	mutex_lock(&rx_lock);
 	partition_info_get_return = arm_spci_smccc(SPCI_PARTITION_INFO_GET_32,
 						   uuid0, uuid1, uuid2, uuid3,
