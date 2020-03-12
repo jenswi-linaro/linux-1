@@ -788,7 +788,7 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 			      num_pages * 4096, GFP_KERNEL);
 
 	rc = optee->spci.ops->mem_share(0, 0, &mem_attr, 1, sgt.sgl,
-		&global_handle);
+		&global_handle, NULL, 0);
 	if (rc) {
 		if (rc == SPCI_NO_MEMORY)
 			return -ENOMEM;
