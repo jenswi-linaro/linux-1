@@ -9,6 +9,7 @@
 #define SPCI_ERROR_32                 0x84000060
 #define SPCI_SUCCESS_32               0x84000061
 
+#define SPCI_FEATURES_32              0x84000064
 #define SPCI_RX_RELEASE_32            0x84000065
 #define SPCI_RXTX_MAP_32              0x84000066
 

@@ -481,6 +481,30 @@ static int spci_memory_reclaim(spci_mem_handle_t global_handle,
 	return 0;
 }
 
+/*
+ * Returns a negative value if function not supported. Otherwise returns w2,
+ * supplying optional feature parameter else 0.
+*/
+
+static int spci_features(uint32_t function_id)
+{
+	struct arm_smcccv1_2_return features_return =
+		arm_spci_smccc(SPCI_FEATURES_32, function_id, 0, 0, 0, 0, 0, 0);
+
+	if (features_return.func == SPCI_ERROR_32) {
+		switch (features_return.arg2){
+		case SPCI_NOT_SUPPORTED:
+			return -ENODEV;
+		default:
+			panic("%s: Unhandled return code (%lld)\n", __func__,
+			      features_return.arg2);
+		}
+	}
+	else {
+		return features_return.arg2;
+	}
+}
+
 static spci_sp_id_t spci_id_get(void)
 {
 	struct  arm_smcccv1_2_return id_get_return =
@@ -624,6 +648,10 @@ static int spci_probe(struct platform_device *pdev)
 
 	/* Initialize VM ID. */
 	vm_id = spci_id_get();
+
+	if (spci_features(SPCI_MSG_SEND_DIRECT_REQ_32)) {
+		return -ENXIO;
+	}
 
 	/* Allocate Rx buffer. */
 	rx_buffer = alloc_page(GFP_KERNEL);
