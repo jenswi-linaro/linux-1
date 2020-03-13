@@ -22,6 +22,7 @@
 #include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/scatterlist.h>
+#include <linux/uaccess.h>
 
 enum message_t
 {
@@ -32,7 +33,7 @@ enum message_t
 	 * w5 -- attributes
 	 */
 	FF_A_MEMORY_SHARE = 1,
-	FF_A_UNDEFINED
+	FF_A_OP_MAX = 256
 };
 
 long test_share_multi_fragment()
@@ -142,8 +143,17 @@ long test_share_multi_fragment()
 long ff_a_test_ioctl(struct file *fd, unsigned int cmd, unsigned long arg)
 {
 	long ret;
+	int user_cmd;
 
-	ret = test_share_multi_fragment();
+	copy_from_user(&user_cmd, arg, 1);
+
+	switch (user_cmd) {
+	case FF_A_MEMORY_SHARE:
+		ret = test_share_multi_fragment();
+		break;
+	default:
+		pr_err("unrecognized test %d\n", user_cmd);
+	}
 
 	return ret;
 }
