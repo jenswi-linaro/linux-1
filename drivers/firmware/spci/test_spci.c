@@ -32,9 +32,17 @@ enum message_t
 	 * w4 -- handle
 	 * w5 -- attributes
 	 */
-	FF_A_MEMORY_SHARE = 1,
+	FF_A_INIT_SP = 1,
+	FF_A_MEMORY_SHARE,
 	FF_A_OP_MAX = 256
 };
+
+static const u32 dest_part_uuid[4] = {0x1, 0x1, 0x1, 0x1};
+static u16 dst_vm_id;
+
+struct spci_ops *ops;
+
+spci_sp_id_t dest_part_id;
 
 long test_share_multi_fragment()
 {
@@ -59,39 +67,17 @@ long test_share_multi_fragment()
 	u32 handle;
 	int retVal;
 
-	struct spci_partition_info *info_partitions;
-
+	struct sg_table sgt;
 	void *mem_region;
 	struct page **pages;
 
-	u32 dest_part_uuid[4] = {0x486178E0, 0xE7F811E3, 0xBC5E0002, 0xA5D5C51B};
-	spci_sp_id_t dest_part_id;
 
 	struct spci_mem_region_attributes attributes[1] = {
 		[0] = {
-			.receiver = 0x8001,
+			.receiver = dest_part_id,
 			.attrs = SPCI_MEM_RW << 5
 		},
 	};
-
-	struct spci_ops *ops = get_spci_ops();
-	if (IS_ERR_OR_NULL(ops))
-	{
-		pr_err("Failed to obtain SPCI ops %s:%d\n", __FILE__, __LINE__);
-	}
-
-	retVal = ops->partition_info_get(dest_part_uuid[0], dest_part_uuid[1],
-							dest_part_uuid[2], dest_part_uuid[3],
-							&info_partitions);
-
-	/* XXX: Assumes that there is a single partition with the dest_aprt_uuid. */
-	dest_part_id = info_partitions->id;
-
-	if(retVal < 0)
-	{
-		pr_err("Failed to obtain destination partition info. %s:%d\n", __FILE__, __LINE__);
-		return retVal;
-	}
 
 	mem_region = kzalloc(mem_size, GFP_KERNEL);
 	if(IS_ERR_OR_NULL(mem_region))
@@ -117,7 +103,6 @@ long test_share_multi_fragment()
 
 		//sg_set_page(sg, cur_page, 4096, 0);
 	}
-	struct sg_table sgt;
 	sg_alloc_table_from_pages(&sgt, pages,
 			      page_entries, 0,
 			      page_entries*4096, GFP_KERNEL);
@@ -145,13 +130,19 @@ long ff_a_test_ioctl(struct file *fd, unsigned int cmd, unsigned long arg)
 	long ret;
 	int user_cmd;
 
-	copy_from_user(&user_cmd, arg, 1);
+	ret = copy_from_user(&user_cmd, (void *)arg, 1);
+	if(ret!=0)
+	{
+		pr_err("Failed to obtain data from userspaced\n");
+		return -1;
+	}
 
 	switch (user_cmd) {
 	case FF_A_MEMORY_SHARE:
 		ret = test_share_multi_fragment();
 		break;
 	default:
+		ret = -1;
 		pr_err("unrecognized test %d\n", user_cmd);
 	}
 
@@ -166,8 +157,33 @@ int ff_a_test_init()
 {
 	int returnVal;
 	struct class *cl;
+	struct spci_partition_info *info_partitions;
 
 	pr_info("FF-A test module init\n");
+
+	ops = get_spci_ops();
+
+	if (IS_ERR_OR_NULL(ops))
+	{
+		pr_err("Failed to obtain SPCI ops %s:%d\n", __FILE__, __LINE__);
+	}
+
+	returnVal = ops->partition_info_get(dest_part_uuid[0], dest_part_uuid[1],
+							dest_part_uuid[2], dest_part_uuid[3],
+							&info_partitions);
+
+	if (returnVal > 1)
+	{
+		pr_warn("Multiple SPs with the %d.%d.%d.%d uuid\n", dest_part_uuid[0], dest_part_uuid[1],
+							dest_part_uuid[2], dest_part_uuid[3] );
+	} else if(returnVal < 0)
+	{
+		pr_err("Failed to obtain destination partition info. %s:%d\n", __FILE__, __LINE__);
+		return returnVal;
+	}
+
+	/* XXX: Assumes that there is a single partition with the dest_aprt_uuid. */
+	dest_part_id = info_partitions->id;
 
 	cl = class_create(THIS_MODULE, "ff_a_test");
 	if (IS_ERR(cl))
@@ -179,7 +195,11 @@ int ff_a_test_init()
 	/* Create device file in the /dev directory. */
 	device_create(cl, NULL, MKDEV(returnVal, 0),NULL, "FF_A_TEST_DEVICE");
 
+	pr_info("FF-A test module init SP\n");
+	ops->sync_msg_send(dest_part_id, FF_A_INIT_SP, 0, 0, 0, 0);
+
 	pr_info("FF-A test module init finalized\n");
+
 	return 0;
 }
 
