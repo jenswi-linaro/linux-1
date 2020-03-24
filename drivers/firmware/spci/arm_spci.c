@@ -355,7 +355,7 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 			goto err;
 		}
 
-		pr_devel("arm_spci mem_share pa=%#X\n", address);
+		pr_devel("arm_spci mem_share pa=%#lX\n", address);
 
 		constituents[num_constituents].address = address;
 		constituents[num_constituents].page_count = sg->length/PAGE_SIZE;
