@@ -127,6 +127,7 @@ struct spci_ops {
 
 	/**
 	 * Registers a memory region with the SPCI implementation.
+	 *
 	 * Params:
 	 *  - tag: Implementation defined value.
 	 *  - flags:
@@ -138,21 +139,18 @@ struct spci_ops {
 	 *  - sg: scatter list holding the pages to be shared.
 	 *  - global_handle: A system-wide unique handle referring to the shared
 	 *     set of physical pages being shared.
-	 *  - buffer: a pointer to a pre-allocated IPA-contiguous buffer to be
-	 *  	populated by mem_share. The buffer size must be a multiple of 4k.
-	 *  	The buffer must be NULL if mem_share should	use the Tx buffer.
-	 *  - buffer_size: the size of the IPA-contiguos memory region pointed to by
-	 *  	buffer. The buffer_soze must be a multiple of 4k.
-	 *  	It MBZ if buffer is NULL.
+	 *  - use_tx: select if memorry region description is transmitted in tx or
+	 *     in a dynamically allocated buffer. When using the tx buffer a global
+	 *     lock on the tx buffer will be held.
 	 *
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
 	 */
 	int (*mem_share)(u32 tag, enum mem_clear_t flags,
 			  struct spci_mem_region_attributes attrs[],
-			  u32 num_attrs, struct scatterlist *sg,
-			  spci_mem_handle_t *global_handle, void *buffer,
-			  u32 buffer_size);
+			  u32 num_attrs, struct scatterlist *sg, u32 nents,
+			  spci_mem_handle_t *global_handle, bool use_tx);
+
 	/**
 	 * Reclaims a memory region previously registered with the SPCI
 	 *  implementation.

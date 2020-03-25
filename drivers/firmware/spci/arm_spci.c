@@ -9,6 +9,7 @@
  *
  * Copyright (C) 2019, 2020 Arm Ltd.
  */
+#define DEBUG
 
 #include <linux/platform_device.h>
 #include <linux/arm_spci.h>
@@ -114,12 +115,12 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	return ret;
 }
 
-static int spci_share_fragment_tx(u32 page_count,
+static int spci_share_fragment_tx(void *buffer, u32 buffer_size,
 	u32 fragment_len, u32 total_len, u32 cookie,
 	struct arm_smcccv1_2_return *smccc_return)
 {
 	*smccc_return =
-		arm_spci_smccc(SPCI_MEM_SHARE_64, 0, page_count, fragment_len,
+		arm_spci_smccc(SPCI_MEM_SHARE_64, buffer, buffer_size, fragment_len,
 			total_len, cookie, 0, 0);
 
 	while (smccc_return->func != SPCI_SUCCESS_32) {
@@ -205,18 +206,6 @@ static int spci_rx_release(void)
 	return 0;
 }
 
-static u32 spci_count_total_constituents(struct scatterlist *sg)
-{
-	u32 num_constituents = 0;
-
-	do {
-		num_constituents += 1;
-	} while((sg = sg_next(sg)));
-
-	return num_constituents;
-}
-
-
 #define MAX_COOKIE 10
 static bool cookie_tracker[MAX_COOKIE] = {0};
 
@@ -228,18 +217,22 @@ static bool cookie_tracker[MAX_COOKIE] = {0};
  */
 static inline u32 get_mem_share_cookie()
 {
-
 	u32 index;
+	u32 ret = 0;
 
 	for (index=0; index<MAX_COOKIE; index++)
 	{
 		if (cookie_tracker[index] == 0)	{
 			cookie_tracker[index] = 1;
-			return index+1;
+			ret = index+1;
+
+			pr_debug("SPCI: get cookie %d\n", ret);
+
+			return ret;
 		}
 	}
 
-	return 0;
+	return ret;
 }
 
 /**
@@ -247,14 +240,14 @@ static inline u32 get_mem_share_cookie()
  */ 
 static inline bool put_mem_share_cookie(u32 cookie)
 {
-
-	if (cookie_tracker[cookie] == 1)
+	if (cookie_tracker[cookie - 1] == 0)
 	{
 		pr_err("Tried to erroneously put cookie %d\n", cookie);
 		return false;
 	}
 
-	cookie_tracker[cookie] = 0;
+	pr_debug("SPCI: put cookie %d\n", cookie);
+	cookie_tracker[cookie - 1] = 0;
 
 	return true;
 }
@@ -269,42 +262,41 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 	return num_pages;
 }
 
+
+
 /*
  * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
  */
-int spci_share_memory(u32 tag, enum mem_clear_t flags,
+static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 	struct spci_mem_region_attributes *attrs,
-	u32 num_attrs, struct scatterlist *sg,
-	spci_mem_handle_t *global_handle, void *buffer, u32 buffer_size)
+	u32 num_attrs, struct scatterlist *sg, u32 nents,
+	spci_mem_handle_t *global_handle, void *buffer, uint32_t buffer_size,
+	u32 cookie)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
 	u32 num_constituents;
 	struct spci_mem_region_constituent *constituents;
 	struct arm_smcccv1_2_return smccc_return;
-	u32 total_num_constituents;
 	u32 region_len;
 	u32 ephemeral_region_len;
 	u32 fragment_len = sizeof(struct spci_mem_region);
-	u32 local_num_pages = spci_get_num_pages_sg(sg);
-	u32 cookie = 0;
 	u32 max_fragment_size;
 	int rc = 0;
 
-	/* Lock access to the TX Buffer before populating. */
-	mutex_lock(&tx_lock);
-	if(buffer!=NULL) {
-		mem_region = (struct spci_mem_region *)buffer;
-		max_fragment_size = buffer_size;
-		if (buffer_size % SPCI_BASE_GRANULE_SIZE)
-		{
-			pr_err("%s: buffer size must be a multiple of 4kiB", __func__);
-			rc = -ENXIO;
-		}
+	if(buffer) {
+
+		BUG_ON(!buffer_size);
+		max_fragment_size = buffer_size * SPCI_BASE_GRANULE_SIZE;
+		mem_region = phys_to_virt(buffer);
+
 	} else {
+
+		BUG_ON(buffer_size);
 		mem_region = (struct spci_mem_region *)page_address(tx_buffer);
 		max_fragment_size = SPCI_BASE_GRANULE_SIZE;
+
 	}
 
 	mem_region->flags = flags;
@@ -312,24 +304,18 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	mem_region->sender_id = vm_id;
 	mem_region->page_count = spci_get_num_pages_sg(sg);
 
-	mem_region->constituent_count = sg_nents(sg);
-
 	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
 	fragment_len = mem_region->constituent_offset;
 
 	/* Ensure attribute description fits withing the Tx buffer. */
-	if (mem_region->constituent_offset >= max_fragment_size) {
-		rc = -ENXIO;
-		goto err;
-	}
+	if (mem_region->constituent_offset >= max_fragment_size)
+		return -ENXIO;
 
 	constituents = (struct spci_mem_region_constituent *)
 		(((void *)mem_region) + mem_region->constituent_offset);
 
-	total_num_constituents = spci_count_total_constituents(sg);
-
-	mem_region->constituent_count = total_num_constituents;
-	region_len = compute_region_length(total_num_constituents, num_attrs);
+	mem_region->constituent_count = nents;
+	region_len = compute_region_length(nents, num_attrs);
 
 	for (index = 0; index < num_attrs; index++) {
 		mem_region->attributes[index].receiver = attrs[index].receiver;
@@ -353,8 +339,7 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 		{
 			pr_err("%s: memory region fragment greater that the Tx buffer",
 				 __func__);
-			rc = -EFAULT;
-			goto err;
+			return -EFAULT;
 		}
 
 		pr_devel("arm_spci mem_share pa=%#lX\n", address);
@@ -370,72 +355,102 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 		 */
 		if (fragment_len == max_fragment_size) {
 
-			/*
-			 * XXX: Executing with tx_lock acquired until all fragments are
-			 * transferred.
-			 */
-			if (ephemeral_region_len)
-			{
-				if(cookie!=0) {
-					panic("initialized mem_share cookie");
-				}
-
-				cookie = get_mem_share_cookie();
-
-				if(!cookie)
-				{
-					pr_err("%s: failed to get a valid mem_share cookie\n",
-						__func__);
-
-					return -ENXIO;
-				}
-			}
-
 			/* Transmit fragment. */
-			rc = spci_share_fragment_tx(local_num_pages,
+			rc = spci_share_fragment_tx(buffer, buffer_size,
 				fragment_len, ephemeral_region_len, cookie,
 				&smccc_return);
 
-			/* Allow another thread to access the tx buffer. */
-			mutex_unlock(&tx_lock);
-
 			if (rc < 0)
-			{
-				return rc;
-			}
+				return -ENXIO;
 
 			/* ephemeral_region_len MBZ after the first invocation. */
 			ephemeral_region_len = 0;
 
-			/* local_num_pages MBZ after the first invocation. */
-			local_num_pages =0;
+			/* buffer_size MBZ after the first invocation. */
+			buffer_size = 0;
 			constituents = (struct spci_mem_region_constituent *)mem_region;
 			num_constituents = 0;
 			fragment_len = 0;
 
-			/* Regain exclusive access to the Tx buffer. */
-			mutex_lock(&tx_lock);
 		}
 	} while((sg = sg_next(sg)));
 
-	rc = spci_share_fragment_tx(local_num_pages,
+	if (fragment_len == ephemeral_region_len)
+		cookie = 0;
+
+	rc = spci_share_fragment_tx(buffer, buffer_size,
 		fragment_len, ephemeral_region_len, cookie,
 		&smccc_return);
 
-	/* If unique cookie was obtained, put it back. */
-	if (cookie)
+	*global_handle = smccc_return.arg2;
+
+	return rc;
+}
+
+/*
+ * Share a set of pages with a list of destination endpoints.
+ *
+ * Returns a system-wide unique handle
+ */
+static int spci_share_memory(u32 tag, enum mem_clear_t flags,
+	struct spci_mem_region_attributes *attrs,
+	u32 num_attrs, struct scatterlist *sg, u32 nents,
+	spci_mem_handle_t *global_handle, bool use_tx)
+{
+	u32 buffer_size = 0;
+	void *buffer_pa = NULL;
+	int ret;
+	struct page *buffer_page = NULL;
+	u32 cookie;
+
+	if (!use_tx)
 	{
-		if(!put_mem_share_cookie(cookie))
+		/* Allocate buffer for this mem_share operation. */
+		buffer_page = alloc_page(GFP_KERNEL);
+		if (IS_ERR_OR_NULL(buffer_page))
 		{
-			panic("failed to put cookie %d\n", cookie);
+			/* print error. Return as tx lock is not held. */
+			pr_err("%s: unable to allocate buffer", __func__);
+			return -ENOMEM;
 		}
-		cookie = 0;
+
+		buffer_pa = page_to_phys(buffer_page);
+
+		buffer_size = 1;
 	}
 
-	*global_handle = smccc_return.arg2;
+	mutex_lock(&tx_lock);
+
+	cookie = get_mem_share_cookie();
+	if (!cookie)
+	{
+		pr_err("%s: failed to get a valid mem_share cookie\n", __func__);
+		ret = -ENXIO;
+		goto err;
+	}
+
+	if (!use_tx)
+		mutex_unlock(&tx_lock);
+
+	ret = _spci_share_memory(tag, flags, attrs, num_attrs, sg, nents,
+		global_handle, buffer_pa, buffer_size, cookie);
+
+	if (!use_tx)
+		mutex_lock(&tx_lock);
+
+	if(!put_mem_share_cookie(cookie))
+	{
+		panic("failed to put cookie %d\n", cookie);
+	}
+
 err:
+
 	mutex_unlock(&tx_lock);
-	return rc;
+	
+	if (!use_tx)
+		free_page(buffer_page);
+
+	return ret;
 }
 
 static int spci_memory_reclaim(spci_mem_handle_t global_handle,
@@ -551,6 +566,7 @@ EXPORT_SYMBOL_GPL(get_spci_ops);
 static int spci_dt_init(struct device_node *np)
 {
 	const char *conduit;
+	const char *selected_buffer;
 
 	pr_info("SPCI: obtaining conduit from DT.\n");
 
