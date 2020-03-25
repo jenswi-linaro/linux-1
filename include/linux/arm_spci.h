@@ -75,20 +75,26 @@ typedef u16 spci_sp_id_t;
 struct spci_mem_region_constituent {
 	u64 address;
 	u32 page_count;
+	u32 reserved_12_15;
 };
 
 struct spci_mem_region_attributes {
 	spci_sp_id_t receiver;
 	u16 attrs;
+	u32 reserved_4_7;
+	u64 reserved_8_15;
 };
 
 struct spci_mem_region {
 	u32 tag;
 	u32 flags;
+	u16 sender_id;
+	u16 reserved_10_11;
 	u32 page_count;
 	u32 constituent_count;
 	u32 constituent_offset;
 	u32 attribute_count;
+	u32 reserved_28_31;
 
 	struct spci_mem_region_attributes attributes[];
 };

@@ -309,6 +309,8 @@ int spci_share_memory(u32 tag, enum mem_clear_t flags,
 
 	mem_region->flags = flags;
 	mem_region->tag = tag;
+	mem_region->sender_id = vm_id;
+	mem_region->page_count = spci_get_num_pages_sg(sg);
 
 	mem_region->constituent_count = sg_nents(sg);
 
