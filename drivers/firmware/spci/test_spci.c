@@ -109,7 +109,7 @@ long test_share_multi_fragment()
 
 	pr_info("Start mem share %s:%d\n", __FILE__, __LINE__);
 	// tag, flags, *attrs, num_attrs, *pages[], num_pages, *global_handle
-	retVal = ops->mem_share(0, 1, attributes, 1, sgt.sgl, &handle, NULL, 0);
+	retVal = ops->mem_share(0, 1, attributes, 1, sgt.sgl, sgt.nents, &handle, true);
 
 	if(retVal)
 	{
