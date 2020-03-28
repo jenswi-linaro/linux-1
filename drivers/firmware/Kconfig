@@ -79,7 +79,7 @@ config ARM_SDE_INTERFACE
 
 config ARM_SPCI_TRANSPORT
 	bool "ARM Secure Partition Client Interface (SPCI)"
-	depends on ARM64
+	depends on ARM64 || ARM
 	help
 	  The Secure Partition Client Interface (SPCI) is an Arm standard for
 	  communication and memory sharing between entities managed by SMCCC

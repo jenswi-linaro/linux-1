@@ -49,7 +49,6 @@ arm_spci_##conduit(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,	\
 }
 
 SPCI_DEFINE_CALL(smc)
-
 SPCI_DEFINE_CALL(hvc)
 
 static u32 sender_receiver_pack(u32 src_id, u32 dst_id)
@@ -215,7 +214,7 @@ static bool cookie_tracker[MAX_COOKIE] = {0};
  *
  * A 0 return signals failure.
  */
-static inline u32 get_mem_share_cookie()
+static inline u32 get_mem_share_cookie(void)
 {
 	u32 index;
 	u32 ret = 0;

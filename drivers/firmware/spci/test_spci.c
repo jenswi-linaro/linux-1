@@ -44,7 +44,7 @@ struct spci_ops *ops;
 
 spci_sp_id_t dest_part_id;
 
-long test_share_multi_fragment()
+long test_share_multi_fragment(void)
 {
 	/*
 	 *  We intend to reserve memory that would require at least 2 fragments
@@ -153,7 +153,7 @@ struct file_operations fops = {
 	.unlocked_ioctl = ff_a_test_ioctl,
 };
 
-int ff_a_test_init()
+int ff_a_test_init(void)
 {
 	int returnVal;
 	struct class *cl;

@@ -3,6 +3,8 @@
  * Copyright (C) 2019 Arm Ltd.
  */
 
+//#if defined(ARM64)
+#if CONFIG_ARM64 
 struct arm_smcccv1_2_return {
 	u64 func;
 	u64 arg1;
@@ -13,6 +15,18 @@ struct arm_smcccv1_2_return {
 	u64 arg6;
 	u64 arg7;
 };
+#elif CONFIG_ARM
+struct arm_smcccv1_2_return {
+	u32 func;
+	u32 arg1;
+	u32 arg2;
+	u32 arg3;
+	u32 arg4;
+	u32 arg5;
+	u32 arg6;
+	u32 arg7;
+};
+#endif
 
 /**
  * __arm_smcccv1_2_hvc() - make HVC calls
