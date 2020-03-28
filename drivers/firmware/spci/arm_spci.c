@@ -650,6 +650,8 @@ static int spci_probe(struct platform_device *pdev)
 	vm_id = spci_id_get();
 
 	if (spci_features(SPCI_MSG_SEND_DIRECT_REQ_32)) {
+		pr_err("%s: SPCI implementation at EL2 does not support"
+			" SPCI_MSG_SEND_DIRECT_REQ_32\n", __func__);
 		return -ENXIO;
 	}
 
