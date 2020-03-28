@@ -78,7 +78,7 @@ config ARM_SDE_INTERFACE
 	  into the OS. This is typically used to implement RAS notifications.
 
 config ARM_SPCI_TRANSPORT
-	bool "ARM Secure Partition Client Interface (SPCI)"
+	tristate "ARM Secure Partition Client Interface (SPCI)"
 	depends on ARM64 || ARM
 	help
 	  The Secure Partition Client Interface (SPCI) is an Arm standard for

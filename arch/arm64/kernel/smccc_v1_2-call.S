@@ -3,6 +3,7 @@
  * Copyright (C) 2019 Arm Ltd.
  */
 
+#include <asm/assembler.h>
 #include <linux/linkage.h>
 
 .macro SMC_CALL conduit
@@ -18,7 +19,9 @@
 ENTRY(__arm_smcccv1_2_hvc)
 	SMC_CALL hvc
 ENDPROC(__arm_smcccv1_2_hvc)
+EXPORT_SYMBOL(__arm_smcccv1_2_hvc)
 
 ENTRY(__arm_smcccv1_2_smc)
 	SMC_CALL smc
 ENDPROC(__arm_smcccv1_2_smc)
+EXPORT_SYMBOL(__arm_smcccv1_2_smc)
