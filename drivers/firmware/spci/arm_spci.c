@@ -114,54 +114,101 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	return ret;
 }
 
-static int spci_share_fragment_tx(void *buffer, u32 buffer_size,
-	u32 fragment_len, u32 total_len, u32 cookie,
-	struct arm_smcccv1_2_return *smccc_return)
+static int spci_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 {
-	*smccc_return =
-		arm_spci_smccc(SPCI_MEM_SHARE_64, buffer, buffer_size, fragment_len,
-			total_len, cookie, 0, 0);
 
-	while (smccc_return->func != SPCI_SUCCESS_32) {
+	struct arm_smcccv1_2_return smccc_return;
+	u32 handle_high = (handle >> 32) & 0xffffffff;
+	u32 handle_low = handle & 0xffffffff;
 
-		if (smccc_return->func == SPCI_ERROR_32) {
-			switch (smccc_return->arg2) {
+	smccc_return =
+		arm_spci_smccc(SPCI_MEM_FRAG_TX_32, handle_high,
+			handle_low, frag_len, vm_id<<16, 0, 0, 0);
+
+	while (smccc_return.func != SPCI_MEM_FRAG_RX_32) {
+
+		if (smccc_return.func == SPCI_ERROR_32) {
+			switch (smccc_return.arg2) {
+			case SPCI_INVALID_PARAMETERS:
+				return -ENXIO;
+			case SPCI_NOT_SUPPORTED:
+				return -ENODEV;
+			default:
+				pr_warn("%s: Unknown Error code %x\n", __func__,
+					smccc_return.arg2);
+				return -EIO;
+			}
+		}
+
+		if (smccc_return.func == SPCI_MEM_OP_PAUSE_32) {
+
+			smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, smccc_return.arg1,
+				smccc_return.arg2, 0, 0, 0, 0, 0);
+		}
+	}
+
+	*tx_offset = smccc_return.arg3;
+
+	return 0;
+}
+
+static int spci_share_init_frag(void *buffer, u32 buffer_size,
+	u32 fragment_len, u32 total_len, u64 *handle)
+{
+
+	struct arm_smcccv1_2_return smccc_return;
+	smccc_return =
+		arm_spci_smccc(SPCI_MEM_SHARE_64, total_len, fragment_len, buffer,
+		buffer_size, 0, 0, 0);
+
+	while (smccc_return.func != SPCI_SUCCESS_32) {
+
+		if (smccc_return.func == SPCI_ERROR_32) {
+			switch (smccc_return.arg2) {
 			case SPCI_INVALID_PARAMETERS:
 				return -ENXIO;
 			case SPCI_DENIED:
 				return -EIO;
 			case SPCI_NO_MEMORY:
 				return -ENOMEM;
-			case SPCI_RETRY:
+			case SPCI_ABORTED:
 				return -EAGAIN;
 			default:
 				pr_warn("%s: Unknown Error code %x\n", __func__,
-					smccc_return->arg2);
+					smccc_return.arg2);
 				return -EIO;
 			}
 		}
 
-		if (smccc_return->func == SPCI_MEM_OP_PAUSE_32) {
-			u32 cookie = smccc_return->arg1;
+		if (smccc_return.func == SPCI_MEM_OP_PAUSE_32) {
 
-			*smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, cookie,
-				0, 0, 0, 0, 0, 0);
+			smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, smccc_return.arg1,
+				smccc_return.arg2, 0, 0, 0, 0, 0);
 		}
 	}
+
+	*handle = (smccc_return.arg1 << 32) | smccc_return.arg2;
 
 	return 0;
 }
 
-static inline u16 set_mem_attributes(enum spci_mem_permission perm,
-	enum spci_mem_type type)
+static inline u32 compute_composite_offset(u32 num_attributes)
 {
-	return perm << 5 | type << 4;
+	u32 composite_offset = offsetof(struct spci_mem_region,
+		endpoints[num_attributes]);
+
+	/* ensure composite are 8 byte aligned. */
+	if (composite_offset & 0x7)
+		return (composite_offset & (~(u32)0x7)) + 0x8;
+
+	return composite_offset;
 }
 
 static inline u32 compute_constituent_offset(u32 num_attributes)
 {
 	u32 constituent_offset = offsetof(struct spci_mem_region,
-		attributes[num_attributes]);
+		endpoints[num_attributes]) +
+		offsetof(struct spci_composite_memory_region, constituents[0]);
 
 	/* ensure constituents are 8 byte aligned. */
 	if (constituent_offset & 0x7)
@@ -173,6 +220,7 @@ static inline u32 compute_constituent_offset(u32 num_attributes)
 static inline u32 compute_region_length(u32 num_constituents,
 	u32 num_attributes)
 {
+	/* This assumes that there is a single spci_composite_memory_region. */
 	return compute_constituent_offset(num_attributes) +
 		sizeof(struct spci_mem_region_constituent)*num_constituents;
 }
@@ -205,52 +253,6 @@ static int spci_rx_release(void)
 	return 0;
 }
 
-#define MAX_COOKIE 10
-static bool cookie_tracker[MAX_COOKIE] = {0};
-
-/** 
- * Obtain a unique cookie to be used in the spci_mem_share operations.
- * Must only be called with tx_lock acquired.
- *
- * A 0 return signals failure.
- */
-static inline u32 get_mem_share_cookie(void)
-{
-	u32 index;
-	u32 ret = 0;
-
-	for (index=0; index<MAX_COOKIE; index++)
-	{
-		if (cookie_tracker[index] == 0)	{
-			cookie_tracker[index] = 1;
-			ret = index+1;
-
-			pr_debug("SPCI: get cookie %d\n", ret);
-
-			return ret;
-		}
-	}
-
-	return ret;
-}
-
-/**
- * Put a unique cookie used for spci_mem_share operations.
- */ 
-static inline bool put_mem_share_cookie(u32 cookie)
-{
-	if (cookie_tracker[cookie - 1] == 0)
-	{
-		pr_err("Tried to erroneously put cookie %d\n", cookie);
-		return false;
-	}
-
-	pr_debug("SPCI: put cookie %d\n", cookie);
-	cookie_tracker[cookie - 1] = 0;
-
-	return true;
-}
-
 static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 {
 	uint32_t num_pages = 0;
@@ -261,7 +263,45 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 	return num_pages;
 }
 
+static inline struct spci_memory_region_attribute spci_set_region_normal(
+	enum spci_mem_cacheability cacheability,
+	enum spci_mem_shareability shareability)
+{
+	struct spci_memory_region_attribute attr = {0};
 
+	attr.attribute = (SPCI_MEM_NORMAL << SPCI_MEMTYPE_OFFSET) |
+		(cacheability << SPCI_CACHEABILITY_OFFSET) | shareability;
+
+	return attr;
+}
+
+static inline struct spci_memory_region_attribute spci_set_region_device(
+	enum spci_mem_device_type device_type)
+{
+	struct spci_memory_region_attribute attr = {0};
+
+	attr.attribute = (SPCI_MEM_DEVICE << SPCI_MEMTYPE_OFFSET) |
+		(device_type << SPCI_DEVICE_OFFSET);
+
+	return attr;
+}
+
+static inline int spci_transmit_fragment(u32 *tx_offset, void *buffer,
+	u32 buffer_size, u32 frag_len, u32 total_len, u64 *handle)
+{
+	int rc;
+
+	if(*tx_offset==0) {
+		rc = spci_share_init_frag(buffer, buffer_size,
+			frag_len, total_len, handle);
+
+		*tx_offset = frag_len;
+	} else
+		rc = spci_share_next_frag(*handle, frag_len, tx_offset);
+
+
+	return rc;
+}
 
 /*
  * Share a set of pages with a list of destination endpoints.
@@ -270,19 +310,19 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 	struct spci_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg, u32 nents,
-	spci_mem_handle_t *global_handle, void *buffer, uint32_t buffer_size,
-	u32 cookie)
+	spci_mem_handle_t *handle, void *buffer, uint32_t buffer_size)
 {
 	struct spci_mem_region *mem_region;
 	u32 index;
 	u32 num_constituents;
 	struct spci_mem_region_constituent *constituents;
 	struct arm_smcccv1_2_return smccc_return;
-	u32 region_len;
-	u32 ephemeral_region_len;
+	u32 total_len;
 	u32 fragment_len = sizeof(struct spci_mem_region);
 	u32 max_fragment_size;
 	int rc = 0;
+	u32 tx_offset = 0;
+	struct spci_composite_memory_region *composite = NULL;
 
 	if(buffer) {
 
@@ -301,33 +341,59 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 	mem_region->flags = flags;
 	mem_region->tag = tag;
 	mem_region->sender_id = vm_id;
-	mem_region->page_count = spci_get_num_pages_sg(sg);
+	mem_region->region_attr = spci_set_region_normal(SPCI_WRITE_BACK,
+		SPCI_OUTER_SHAREABLE);
+	composite = spci_get_composite(mem_region, num_attrs);
+	composite->total_page_count = spci_get_num_pages_sg(sg);
 
-	mem_region->constituent_offset = compute_constituent_offset(num_attrs);
-	fragment_len = mem_region->constituent_offset;
+	fragment_len = compute_constituent_offset(num_attrs);
 
-	/* Ensure attribute description fits withing the Tx buffer. */
-	if (mem_region->constituent_offset >= max_fragment_size)
+	/* Ensure attribute description fits within the Tx buffer. */
+	if (fragment_len > max_fragment_size)
 		return -ENXIO;
 
 	constituents = (struct spci_mem_region_constituent *)
-		(((void *)mem_region) + mem_region->constituent_offset);
+		(((void *)mem_region) + fragment_len);
 
-	mem_region->constituent_count = nents;
-	region_len = compute_region_length(nents, num_attrs);
+	composite->constituent_count = nents;
+	total_len = compute_region_length(nents, num_attrs);
 
 	for (index = 0; index < num_attrs; index++) {
-		mem_region->attributes[index].receiver = attrs[index].receiver;
-		mem_region->attributes[index].attrs =
+		mem_region->endpoints[index].receiver = attrs[index].receiver;
+		mem_region->endpoints[index].attrs =
 			attrs[index].attrs;
+
+		mem_region->endpoints[index].composite_off =
+			compute_composite_offset(num_attrs);
 	}
-	mem_region->attribute_count = num_attrs;
+	mem_region->endpoint_count = num_attrs;
 
 	num_constituents = 0;
-	ephemeral_region_len = region_len;
 
 	do {
-		phys_addr_t address = sg_phys(sg);
+		phys_addr_t address;
+
+		/*
+		 * If current fragment size equal Tx size trigger fragment
+		 * transfer.
+		 */
+		if (fragment_len == max_fragment_size) {
+
+			/* Transmit fragment. */
+			rc = spci_transmit_fragment(&tx_offset, buffer, buffer_size,
+				fragment_len, total_len, handle);
+
+			if (rc < 0)
+				return -ENXIO;
+
+
+			constituents = (struct spci_mem_region_constituent *)mem_region;
+			num_constituents = 0;
+			fragment_len = 0;
+
+		}
+
+		address = sg_phys(sg);
 
 		/*
 		 * Detect if any part of the constituent region surpasses the Tx
@@ -348,40 +414,11 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 		num_constituents++;
 		fragment_len += sizeof(struct spci_mem_region_constituent);
 
-		/*
-		 * If current fragment size equal Tx size trigger fragment
-		 * transfer.
-		 */
-		if (fragment_len == max_fragment_size) {
 
-			/* Transmit fragment. */
-			rc = spci_share_fragment_tx(buffer, buffer_size,
-				fragment_len, ephemeral_region_len, cookie,
-				&smccc_return);
-
-			if (rc < 0)
-				return -ENXIO;
-
-			/* ephemeral_region_len MBZ after the first invocation. */
-			ephemeral_region_len = 0;
-
-			/* buffer_size MBZ after the first invocation. */
-			buffer_size = 0;
-			constituents = (struct spci_mem_region_constituent *)mem_region;
-			num_constituents = 0;
-			fragment_len = 0;
-
-		}
 	} while((sg = sg_next(sg)));
 
-	if (fragment_len == ephemeral_region_len)
-		cookie = 0;
-
-	rc = spci_share_fragment_tx(buffer, buffer_size,
-		fragment_len, ephemeral_region_len, cookie,
-		&smccc_return);
-
-	*global_handle = smccc_return.arg2;
+	rc = spci_transmit_fragment(&tx_offset, buffer, buffer_size,
+		fragment_len, total_len, handle);
 
 	return rc;
 }
@@ -400,7 +437,6 @@ static int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	void *buffer_pa = NULL;
 	int ret;
 	struct page *buffer_page = NULL;
-	u32 cookie;
 
 	if (!use_tx)
 	{
@@ -418,36 +454,14 @@ static int spci_share_memory(u32 tag, enum mem_clear_t flags,
 		buffer_size = 1;
 	}
 
-	mutex_lock(&tx_lock);
-
-	cookie = get_mem_share_cookie();
-	if (!cookie)
-	{
-		pr_err("%s: failed to get a valid mem_share cookie\n", __func__);
-		ret = -ENXIO;
-		goto err;
-	}
-
-	if (!use_tx)
-		mutex_unlock(&tx_lock);
-
-	ret = _spci_share_memory(tag, flags, attrs, num_attrs, sg, nents,
-		global_handle, buffer_pa, buffer_size, cookie);
-
-	if (!use_tx)
+	if (use_tx)
 		mutex_lock(&tx_lock);
 
-	if(!put_mem_share_cookie(cookie))
-	{
-		panic("failed to put cookie %d\n", cookie);
-	}
+	ret = _spci_share_memory(tag, flags, attrs, num_attrs, sg, nents,
+		global_handle, buffer_pa, buffer_size);
 
-err:
-
-	mutex_unlock(&tx_lock);
-	
-	if (!use_tx)
-		free_page(buffer_page);
+	if (use_tx)
+		mutex_unlock(&tx_lock);
 
 	return ret;
 }

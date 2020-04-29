@@ -25,6 +25,9 @@
 
 #define SPCI_MEM_SHARE_64             0xC4000073
 
+#define SPCI_MEM_FRAG_RX_32			  0x8400007A
+#define SPCI_MEM_FRAG_TX_32			  0x8400007B
+
 /* SPCI error codes. */
 #define SPCI_SUCCESS            (0)
 #define SPCI_NOT_SUPPORTED      (-1)
@@ -34,28 +37,39 @@
 #define SPCI_INTERRUPTED        (-5)
 #define SPCI_DENIED             (-6)
 #define SPCI_RETRY              (-7)
+#define SPCI_ABORTED            (-8)
 
 #define SPCI_BASE_GRANULE_SIZE 4096
 
 struct scatterlist;
 
 enum spci_mem_permission {
-	SPCI_MEM_R,
-	SPCI_MEM_RX,
-	SPCI_MEM_RW,
+	SPCI_MEM_R   = 0x5,
+	SPCI_MEM_RW  = 0x6,
+	SPCI_MEM_XR  = 0x9,
+	SPCI_MEM_XRW = 0xA,
 };
 
+#define SPCI_MEMTYPE_OFFSET 4
 enum spci_mem_type {
-	SPCI_MEM_DEVICE,
-	SPCI_MEM_NORMAL,
+	SPCI_MEM_DEVICE = 0x1,
+	SPCI_MEM_NORMAL = 0x2,
 };
 
+
+#define SPCI_CACHEABILITY_OFFSET 2
 enum spci_mem_cacheability {
-	SPCI_NON_CACHEABLE = 1,
-	SPCI_WRITE_THROUGH,
-	SPCI_WRITE_BACK,
+	SPCI_NON_CACHEABLE = 0x1,
+	SPCI_WRITE_BACK = 0x2,
 };
 
+enum spci_mem_shareability {
+	SPCI_NON_SHAREABLE,
+	SPCI_OUTER_SHAREABLE = 0x2,
+	SPCI_INNER_SHAREABLE = 0x3,
+};
+
+#define SPCI_DEVICE_OFFSET 2
 enum spci_mem_device_type {
 	SPCI_NGNRNE,
 	SPCI_NGNRE,
@@ -68,7 +82,7 @@ enum mem_clear_t {
 	SPCI_CLEAR_MEMORY,
 };
 
-typedef u32 spci_mem_handle_t;
+typedef u64 spci_mem_handle_t;
 
 /* The type of an SPCI endpoint ID */
 typedef u16 spci_sp_id_t;
@@ -79,26 +93,49 @@ struct spci_mem_region_constituent {
 	u32 reserved_12_15;
 };
 
+struct spci_composite_memory_region {
+
+	uint32_t total_page_count;
+	uint32_t constituent_count;
+
+	uint64_t reserved_0;
+
+	struct spci_mem_region_constituent constituents[];
+};
+
 struct spci_mem_region_attributes {
 	spci_sp_id_t receiver;
-	u16 attrs;
-	u32 reserved_4_7;
+	u8 attrs;
+	u32 composite_off;
 	u64 reserved_8_15;
 };
 
-struct spci_mem_region {
-	u32 tag;
-	u32 flags;
-	u16 sender_id;
-	u16 reserved_10_11;
-	u32 page_count;
-	u32 constituent_count;
-	u32 constituent_offset;
-	u32 attribute_count;
-	u32 reserved_28_31;
-
-	struct spci_mem_region_attributes attributes[];
+/* Table 43 */
+struct spci_memory_region_attribute {
+	uint8_t attribute;
 };
+
+struct spci_mem_region {
+	u16 sender_id;
+	struct spci_memory_region_attribute region_attr;
+	u8 reserved_0;
+	u32 flags;
+	u64 handle;
+	u64 tag;
+	u32 reserved_1;
+	u32 endpoint_count;
+	struct spci_mem_region_attributes endpoints[];
+};
+
+static inline struct spci_composite_memory_region *
+spci_get_composite(struct spci_mem_region *mem_region, u32 num_endpoints)
+{
+	struct spci_composite_memory_region *composite;
+
+	composite = (struct spci_composite_memory_region *)(&mem_region->endpoints[num_endpoints]);
+	return composite;
+}
+
 
 struct spci_partition_info {
 		/** The ID of the VM the information is about. */

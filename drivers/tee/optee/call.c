@@ -771,12 +771,12 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 			    unsigned long start)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
-	u32 global_handle = 0;
+	u64 global_handle = 0;
 	u32 rc = 0;
 	struct sg_table sgt;
 	struct spci_mem_region_attributes mem_attr = {
 		.receiver = optee->spci.dst,
-		.attrs = 0x5b,
+		.attrs = SPCI_MEM_RW,
 	};
 
 	rc = check_mem_type(start, num_pages);
