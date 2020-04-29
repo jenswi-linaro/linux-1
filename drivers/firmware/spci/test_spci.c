@@ -64,7 +64,7 @@ long test_share_multi_fragment(void)
 	const u32 mem_size = 4*1024*1024;
 	const u32 page_entries = mem_size/4096/2;
 	u32 index;
-	u32 handle;
+	u64 handle;
 	int retVal;
 
 	struct sg_table sgt;
@@ -75,7 +75,7 @@ long test_share_multi_fragment(void)
 	struct spci_mem_region_attributes attributes[1] = {
 		[0] = {
 			.receiver = dest_part_id,
-			.attrs = SPCI_MEM_RW << 5
+			.attrs = SPCI_MEM_RW,
 		},
 	};
 
