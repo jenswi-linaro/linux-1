@@ -93,24 +93,35 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	ret = arm_spci_smccc(SPCI_MSG_SEND_DIRECT_REQ_32, sender_receiver, 0,
 			     w3, w4, w5, w6, w7);
 
-	if (ret.func == SPCI_ERROR_32) {
-		pr_err("%s: Error sending message %llu\n", __func__, ret.func);
-		switch (ret.arg1) {
-		case SPCI_INVALID_PARAMETERS:
-			ret.func = -ENXIO;
-			break;
-		case SPCI_DENIED:
-		case SPCI_NOT_SUPPORTED:
-			ret.func = -EIO;
-			break;
-		case SPCI_BUSY:
-			ret.func = -EAGAIN;
-			break;
+	while (ret.func != SPCI_MSG_SEND_DIRECT_RESP_32 &&
+		ret.func != SPCI_SUCCESS_32)
+	{
+		if (ret.func == SPCI_ERROR_32) {
+			pr_err("%s: Error sending message %llu\n", __func__, ret.func);
+			switch (ret.arg1) {
+			case SPCI_INVALID_PARAMETERS:
+				ret.func = -ENXIO;
+				goto out;
+
+			case SPCI_DENIED:
+			case SPCI_NOT_SUPPORTED:
+				ret.func = -EIO;
+				goto out;
+
+			case SPCI_BUSY:
+				ret.func = -EAGAIN;
+				goto out;
+			}
+		} else if (ret.func == SPCI_INTERRUPT_32){
+			ret = arm_spci_smccc(SPCI_RUN_32, ret.arg1,
+				0, 0, 0, 0, 0, 0);
 		}
-	} else {
-		ret.func = 0;
+
 	}
 
+	ret.func = 0;
+
+out:
 	return ret;
 }
 
