@@ -126,7 +126,7 @@ struct optee_msg_param_rmem {
 };
 
 /**
- * struct optee_msg_param_smem - spci memory reference parameter
+ * struct optee_msg_param_smem - ffa memory reference parameter
  * @offs:	   Offset into shared memory reference
  * @size:          Size of the buffer
  * @internal_offs: Internal offset into the first page of shared memory
@@ -158,7 +158,7 @@ struct optee_msg_param_value {
  * @attr:	attributes
  * @tmem:	parameter by temporary memory reference
  * @rmem:	parameter by registered memory reference
- * @smem:	parameter by spci registered memory reference
+ * @smem:	parameter by ffa registered memory reference
  * @value:	parameter by opaque value
  *
  * @attr & OPTEE_MSG_ATTR_TYPE_MASK indicates if tmem, rmem or value is used in

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Secure Partitions Communication Interface (SPCI) Protocol driver
+ * Secure Partitions Communication Interface (FFA) Protocol driver
  *
- * SPCI is a system message passing and memory sharing protocol allowing for
+ * FFA is a system message passing and memory sharing protocol allowing for
  * execution contexts to exchange information with other execution contexts
- * residing on other Secure Partitions or Virtual Machines managed by any SPCI
+ * residing on other Secure Partitions or Virtual Machines managed by any FFA
  * compliant firmware framework.
  *
  * Copyright (C) 2020 Arm Ltd.
@@ -13,7 +13,7 @@
 #include <linux/platform_device.h>
 #include <linux/device.h>
 #include <linux/kdev_t.h>
-#include <linux/arm_spci.h>
+#include <linux/arm_ffa.h>
 #include <linux/arm-smcccv1_2.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -40,9 +40,9 @@ enum message_t
 static const u32 dest_part_uuid[4] = {0x1, 0x1, 0x1, 0x1};
 static u16 dst_vm_id;
 
-struct spci_ops *ops;
+struct ffa_ops *ops;
 
-spci_sp_id_t dest_part_id;
+ffa_sp_id_t dest_part_id;
 
 long test_share_multi_fragment(void)
 {
@@ -72,10 +72,10 @@ long test_share_multi_fragment(void)
 	struct page **pages;
 
 
-	struct spci_mem_region_attributes attributes[1] = {
+	struct ffa_mem_region_attributes attributes[1] = {
 		[0] = {
 			.receiver = dest_part_id,
-			.attrs = SPCI_MEM_RW,
+			.attrs = FFA_MEM_RW,
 		},
 	};
 
@@ -157,15 +157,15 @@ int ff_a_test_init(void)
 {
 	int returnVal;
 	struct class *cl;
-	struct spci_partition_info *info_partitions;
+	struct ffa_partition_info *info_partitions;
 
 	pr_info("FF-A test module init\n");
 
-	ops = get_spci_ops();
+	ops = get_ffa_ops();
 
 	if (IS_ERR_OR_NULL(ops))
 	{
-		pr_err("Failed to obtain SPCI ops %s:%d\n", __FILE__, __LINE__);
+		pr_err("Failed to obtain FFA ops %s:%d\n", __FILE__, __LINE__);
 	}
 
 	returnVal = ops->partition_info_get(dest_part_uuid[0], dest_part_uuid[1],

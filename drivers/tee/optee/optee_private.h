@@ -67,15 +67,15 @@ struct optee_supp {
 };
 
 /**
- * struct optee_spci_data -  SPCI communication struct
- * @dst			SPCI destination id, the id of OP-TEE in secure world
- * @ops			SPCI operations
+ * struct optee_ffa_data -  FFA communication struct
+ * @dst			FFA destination id, the id of OP-TEE in secure world
+ * @ops			FFA operations
  * @mutex		Serializes access to @idr
- * @idr			SPCI shared memory global handle translation
+ * @idr			FFA shared memory global handle translation
  */
-struct optee_spci {
+struct optee_ffa {
 	u32 dst;
-	struct spci_ops *ops;
+	struct ffa_ops *ops;
 	struct mutex mutex;
 	struct idr idr;
 };
@@ -111,8 +111,8 @@ struct optee {
 	struct tee_device *teedev;
 	const struct optee_ops *ops;
 	optee_invoke_fn *invoke_fn;
-#ifdef CONFIG_ARM_SPCI_TRANSPORT
-	struct optee_spci spci;
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+	struct optee_ffa ffa;
 #endif
 	struct optee_call_queue call_queue;
 	struct optee_wait_queue wait_queue;
@@ -202,26 +202,26 @@ void optee_fill_pages_list(u64 *dst, struct page **pages, int num_pages,
 
 int optee_enumerate_devices(void);
 
-int optee_shm_add_spci_handle(struct optee *optee, struct tee_shm *shm,
+int optee_shm_add_ffa_handle(struct optee *optee, struct tee_shm *shm,
 			      u32 global_handle);
-int optee_shm_rem_spci_handle(struct optee *optee, u32 global_handle);
-struct tee_shm *optee_shm_from_spci_handle(struct optee *optee,
+int optee_shm_rem_ffa_handle(struct optee *optee, u32 global_handle);
+struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee,
 					   u32 global_handle);
-void optee_spci_disable_shm_cache(struct optee *optee);
+void optee_ffa_disable_shm_cache(struct optee *optee);
 
-int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 			    struct page **pages, size_t num_pages,
 			    unsigned long start);
-int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm);
-int optee_spci_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
+int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm);
+int optee_ffa_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
 				 struct page **pages, size_t num_pages,
 				 unsigned long start);
-int optee_spci_shm_unregister_supp(struct tee_context *ctx,
+int optee_ffa_shm_unregister_supp(struct tee_context *ctx,
 				   struct tee_shm *shm);
 
-int optee_spci_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
-int optee_spci_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
-void optee_handle_spci_rpc(struct tee_context *ctx,
+int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
+int optee_ffa_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
+void optee_handle_ffa_rpc(struct tee_context *ctx,
 			   u32 w4, u32 w5, u32 *w6, u32 *w7);
 
 /*
