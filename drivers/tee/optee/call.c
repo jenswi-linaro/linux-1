@@ -4,7 +4,7 @@
  */
 #include <linux/arm-smccc.h>
 #include <linux/arm-smcccv1_2.h>
-#include <linux/arm_spci.h>
+#include <linux/arm_ffa.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/errno.h>
@@ -16,7 +16,7 @@
 #include <linux/uaccess.h>
 #include "optee_private.h"
 #include "optee_smc.h"
-#include "optee_spci.h"
+#include "optee_ffa.h"
 
 struct optee_call_waiter {
 	struct list_head list_node;
@@ -464,11 +464,11 @@ void optee_disable_shm_cache(struct optee *optee)
 }
 
 /**
- * optee_spci_disable_shm_cache() - Disables caching of some shared memory
+ * optee_ffa_disable_shm_cache() - Disables caching of some shared memory
  *                                  allocation in OP-TEE
  * @optee:	main service struct
  */
-void optee_spci_disable_shm_cache(struct optee *optee)
+void optee_ffa_disable_shm_cache(struct optee *optee)
 {
 	BUG();
 }
@@ -695,21 +695,21 @@ int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 	return 0;
 }
 
-#ifdef CONFIG_ARM_SPCI_TRANSPORT
-static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 				    u32 w6, u32 w7)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct arm_smcccv1_2_return ret = { };
-	const u32 dst = optee->spci.dst;
+	const u32 dst = optee->ffa.dst;
 	struct optee_call_waiter w;
 	int rc = 0;
-	const u32 w3 = OPTEE_SPCI_YIELDING_CALL;
+	const u32 w3 = OPTEE_FFA_YIELDING_CALL;
 
 	/* Initialize waiter */
 	optee_cq_wait_init(&optee->call_queue, &w);
 	while (true) {
-		ret = optee->spci.ops->sync_msg_send(dst, w3, w4, w5, w6, w7);
+		ret = optee->ffa.ops->sync_msg_send(dst, w3, w4, w5, w6, w7);
 
 		if (ret.func) {
 			pr_err("ret.func %d\n", (int)ret.func);
@@ -718,11 +718,11 @@ static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 		}
 
 		switch ((int)ret.arg3) {
-		case SPCI_SUCCESS:
+		case FFA_SUCCESS:
 			break;
-		case SPCI_BUSY:
-			if (w4 == OPTEE_SPCI_YIELDING_CALL_RESUME) {
-				pr_err("err OPTEE_SPCI_YIELDING_CALL_RESUME\n");
+		case FFA_BUSY:
+			if (w4 == OPTEE_FFA_YIELDING_CALL_RESUME) {
+				pr_err("err OPTEE_FFA_YIELDING_CALL_RESUME\n");
 				rc = -EIO;
 				goto done;
 			}
@@ -739,14 +739,14 @@ static int optee_spci_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 			goto done;
 		}
 
-		if (ret.arg4 == OPTEE_SPCI_YIELDING_CALL_RETURN_NORMAL)
+		if (ret.arg4 == OPTEE_FFA_YIELDING_CALL_RETURN_NORMAL)
 			goto done;
 
 		might_sleep();
 		w6 = ret.arg6;
 		w7 = ret.arg7;
-		optee_handle_spci_rpc(ctx, ret.arg4, ret.arg5, &w6, &w7);
-		w4 = OPTEE_SPCI_YIELDING_CALL_RESUME;
+		optee_handle_ffa_rpc(ctx, ret.arg4, ret.arg5, &w6, &w7);
+		w4 = OPTEE_FFA_YIELDING_CALL_RESUME;
 		w5 = ret.arg5;
 	}
 done:
@@ -760,13 +760,13 @@ done:
 	return rc;
 }
 
-int optee_spci_do_call_with_arg(struct tee_context *ctx, struct tee_shm *shm)
+int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *shm)
 {
-	return optee_spci_yielding_call(ctx, OPTEE_SPCI_YIELDING_CALL_WITH_ARG,
+	return optee_ffa_yielding_call(ctx, OPTEE_FFA_YIELDING_CALL_WITH_ARG,
 					shm->sec_world_id, 0, 1);
 }
 
-int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 			    struct page **pages, size_t num_pages,
 			    unsigned long start)
 {
@@ -774,9 +774,9 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	u64 global_handle = 0;
 	u32 rc = 0;
 	struct sg_table sgt;
-	struct spci_mem_region_attributes mem_attr = {
-		.receiver = optee->spci.dst,
-		.attrs = SPCI_MEM_RW,
+	struct ffa_mem_region_attributes mem_attr = {
+		.receiver = optee->ffa.dst,
+		.attrs = FFA_MEM_RW,
 	};
 
 	rc = check_mem_type(start, num_pages);
@@ -787,22 +787,22 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 			      num_pages, 0,
 			      num_pages * 4096, GFP_KERNEL);
 
-	rc = optee->spci.ops->mem_share(0, 0, &mem_attr, 1, sgt.sgl, sgt.nents,
+	rc = optee->ffa.ops->mem_share(0, 0, &mem_attr, 1, sgt.sgl, sgt.nents,
 		&global_handle, true);
 	if (rc) {
-		if (rc == SPCI_NO_MEMORY)
+		if (rc == FFA_NO_MEMORY)
 			return -ENOMEM;
 		return -EINVAL;
 	}
 
-	rc = optee_shm_add_spci_handle(optee, shm, global_handle);
+	rc = optee_shm_add_ffa_handle(optee, shm, global_handle);
 	if (rc) {
-		optee->spci.ops->mem_reclaim(global_handle, 0);
+		optee->ffa.ops->mem_reclaim(global_handle, 0);
 		return rc;
 	}
 
 	/*
-	 * TODO use OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM if
+	 * TODO use OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM if
 	 * hm->num_pages > U16_MAX.
 	 */
 
@@ -811,49 +811,49 @@ int optee_spci_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 	return 0;
 }
 
-int optee_spci_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
+int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	u32 global_handle = shm->sec_world_id;
 	int rc = 0;
 
-	optee_shm_rem_spci_handle(optee, global_handle);
+	optee_shm_rem_ffa_handle(optee, global_handle);
 	shm->sec_world_id = 0;
 
-	rc = optee_spci_yielding_call(ctx,
-				      OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM,
+	rc = optee_ffa_yielding_call(ctx,
+				      OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM,
 				      global_handle, 0, 0);
 	if (rc)
-		pr_err("OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM id 0x%x rc %d\n",
+		pr_err("OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM id 0x%x rc %d\n",
 		       global_handle, rc);
 
-	rc = optee->spci.ops->mem_reclaim(global_handle, 0);
+	rc = optee->ffa.ops->mem_reclaim(global_handle, 0);
 	if (rc)
 		pr_err("mem_reclain: %d", rc);
 
 	return rc;
 }
 
-int optee_spci_shm_unregister_supp(struct tee_context *ctx,
+int optee_ffa_shm_unregister_supp(struct tee_context *ctx,
 				   struct tee_shm *shm)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	int rc = 0;
 
 	/*
-	 * We're skipping the OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM call
+	 * We're skipping the OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM call
 	 * since this is OP-TEE freeing via RPC so it has already retired
 	 * this ID.
 	 */
 
-	rc = optee->spci.ops->mem_reclaim(shm->sec_world_id, 0);
+	rc = optee->ffa.ops->mem_reclaim(shm->sec_world_id, 0);
 	if (rc)
 		pr_err("mem_reclain: %d", rc);
 
-	optee_shm_rem_spci_handle(optee, shm->sec_world_id);
+	optee_shm_rem_ffa_handle(optee, shm->sec_world_id);
 
 	shm->sec_world_id = 0;
 
 	return rc;
 }
-#endif /*CONFIG_ARM_SPCI_TRANSPORT*/
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/

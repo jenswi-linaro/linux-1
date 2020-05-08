@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Secure Partitions Communication Interface (SPCI) Protocol driver
+ * Secure Partitions Communication Interface (FFA) Protocol driver
  *
- * SPCI is a system message passing and memory sharing protocol allowing for
+ * FFA is a system message passing and memory sharing protocol allowing for
  * execution contexts to exchange information with other execution contexts
- * residing on other Secure Partitions or Virtual Machines managed by any SPCI
+ * residing on other Secure Partitions or Virtual Machines managed by any FFA
  * compliant firmware framework.
  *
  * Copyright (C) 2019, 2020 Arm Ltd.
@@ -12,7 +12,7 @@
 #define DEBUG
 
 #include <linux/platform_device.h>
-#include <linux/arm_spci.h>
+#include <linux/arm_ffa.h>
 #include <linux/arm-smcccv1_2.h>
 #include <linux/of_address.h>
 #include <linux/of_platform.h>
@@ -26,18 +26,18 @@
 static DEFINE_MUTEX(rx_lock);
 static DEFINE_MUTEX(tx_lock);
 
-static spci_sp_id_t vm_id;
+static ffa_sp_id_t vm_id;
 
 static struct page *rx_buffer;
 static struct page *tx_buffer;
 
 static struct arm_smcccv1_2_return
-(*arm_spci_smccc)(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,
+(*arm_ffa_smccc)(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,
 		  u64 arg5, u64 arg6, u64 arg7);
 
-#define SPCI_DEFINE_CALL(conduit)					\
+#define FFA_DEFINE_CALL(conduit)					\
 static struct arm_smcccv1_2_return					\
-arm_spci_##conduit(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,	\
+arm_ffa_##conduit(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,	\
 		   u64 arg5, u64 arg6, u64 arg7)			\
 {									\
 	struct arm_smcccv1_2_return smccc_ret;				\
@@ -48,30 +48,30 @@ arm_spci_##conduit(u32 func, u64 arg1, u64 arg2, u64 arg3, u64 arg4,	\
 	return smccc_ret;						\
 }
 
-SPCI_DEFINE_CALL(smc)
-SPCI_DEFINE_CALL(hvc)
+FFA_DEFINE_CALL(smc)
+FFA_DEFINE_CALL(hvc)
 
 static u32 sender_receiver_pack(u32 src_id, u32 dst_id)
 {
 	return (((src_id << 16) & 0xffff0000) | (dst_id & 0xffff));
 }
 
-int spci_msg_send(spci_sp_id_t dst_id, u32 len, u32 attributes)
+int ffa_msg_send(ffa_sp_id_t dst_id, u32 len, u32 attributes)
 {
 	struct arm_smcccv1_2_return msg_send_return;
 
 	/* w1[32:16] Sender endpoint ID, w1[15:0] destination endpoint id. */
 	u32 sender_receiver = sender_receiver_pack(vm_id, dst_id);
 
-	msg_send_return = arm_spci_smccc(SPCI_MSG_SEND_32, sender_receiver,
+	msg_send_return = arm_ffa_smccc(FFA_MSG_SEND_32, sender_receiver,
 					 0, len, attributes, 0, 0, 0);
 
-	if (msg_send_return.func  == SPCI_ERROR_32) {
+	if (msg_send_return.func  == FFA_ERROR_32) {
 		switch (msg_send_return.arg2) {
-		case SPCI_INVALID_PARAMETERS:
+		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
-		case SPCI_DENIED:
-		case SPCI_BUSY:
+		case FFA_DENIED:
+		case FFA_BUSY:
 			return -EAGAIN;
 		default:
 			panic("%s: Unhandled return code (%lld)\n", __func__,
@@ -82,7 +82,7 @@ int spci_msg_send(spci_sp_id_t dst_id, u32 len, u32 attributes)
 }
 
 struct arm_smcccv1_2_return
-spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
+ffa_msg_send_direct_req(ffa_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 			 u64 w6, u64 w7)
 {
 	struct arm_smcccv1_2_return ret;
@@ -90,30 +90,30 @@ spci_msg_send_direct_req(spci_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	/* w1[32:16] Sender endpoint ID, w1[15:0] destination endpoint id. */
 	u32 sender_receiver = sender_receiver_pack(vm_id, dst_id);
 
-	ret = arm_spci_smccc(SPCI_MSG_SEND_DIRECT_REQ_32, sender_receiver, 0,
+	ret = arm_ffa_smccc(FFA_MSG_SEND_DIRECT_REQ_32, sender_receiver, 0,
 			     w3, w4, w5, w6, w7);
 
-	while (ret.func != SPCI_MSG_SEND_DIRECT_RESP_32 &&
-		ret.func != SPCI_SUCCESS_32)
+	while (ret.func != FFA_MSG_SEND_DIRECT_RESP_32 &&
+		ret.func != FFA_SUCCESS_32)
 	{
-		if (ret.func == SPCI_ERROR_32) {
+		if (ret.func == FFA_ERROR_32) {
 			pr_err("%s: Error sending message %llu\n", __func__, ret.func);
 			switch (ret.arg1) {
-			case SPCI_INVALID_PARAMETERS:
+			case FFA_INVALID_PARAMETERS:
 				ret.func = -ENXIO;
 				goto out;
 
-			case SPCI_DENIED:
-			case SPCI_NOT_SUPPORTED:
+			case FFA_DENIED:
+			case FFA_NOT_SUPPORTED:
 				ret.func = -EIO;
 				goto out;
 
-			case SPCI_BUSY:
+			case FFA_BUSY:
 				ret.func = -EAGAIN;
 				goto out;
 			}
-		} else if (ret.func == SPCI_INTERRUPT_32){
-			ret = arm_spci_smccc(SPCI_RUN_32, ret.arg1,
+		} else if (ret.func == FFA_INTERRUPT_32){
+			ret = arm_ffa_smccc(FFA_RUN_32, ret.arg1,
 				0, 0, 0, 0, 0, 0);
 		}
 
@@ -125,7 +125,7 @@ out:
 	return ret;
 }
 
-static int spci_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
+static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 {
 
 	struct arm_smcccv1_2_return smccc_return;
@@ -133,16 +133,16 @@ static int spci_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 	u32 handle_low = handle & 0xffffffff;
 
 	smccc_return =
-		arm_spci_smccc(SPCI_MEM_FRAG_TX_32, handle_high,
-			handle_low, frag_len, vm_id<<16, 0, 0, 0);
+		arm_ffa_smccc(FFA_MEM_FRAG_TX_32, handle_high,
+			handle_low, frag_len, 0, 0, 0, 0);
 
-	while (smccc_return.func != SPCI_MEM_FRAG_RX_32) {
+	while (smccc_return.func != FFA_MEM_FRAG_RX_32) {
 
-		if (smccc_return.func == SPCI_ERROR_32) {
+		if (smccc_return.func == FFA_ERROR_32) {
 			switch (smccc_return.arg2) {
-			case SPCI_INVALID_PARAMETERS:
+			case FFA_INVALID_PARAMETERS:
 				return -ENXIO;
-			case SPCI_NOT_SUPPORTED:
+			case FFA_NOT_SUPPORTED:
 				return -ENODEV;
 			default:
 				pr_warn("%s: Unknown Error code %x\n", __func__,
@@ -151,9 +151,9 @@ static int spci_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 			}
 		}
 
-		if (smccc_return.func == SPCI_MEM_OP_PAUSE_32) {
+		if (smccc_return.func == FFA_MEM_OP_PAUSE_32) {
 
-			smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, smccc_return.arg1,
+			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
 				smccc_return.arg2, 0, 0, 0, 0, 0);
 		}
 	}
@@ -163,26 +163,26 @@ static int spci_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 	return 0;
 }
 
-static int spci_share_init_frag(void *buffer, u32 buffer_size,
+static int ffa_share_init_frag(void *buffer, u32 buffer_size,
 	u32 fragment_len, u32 total_len, u64 *handle)
 {
 
 	struct arm_smcccv1_2_return smccc_return;
 	smccc_return =
-		arm_spci_smccc(SPCI_MEM_SHARE_64, total_len, fragment_len, buffer,
+		arm_ffa_smccc(FFA_MEM_SHARE_64, total_len, fragment_len, buffer,
 		buffer_size, 0, 0, 0);
 
-	while (smccc_return.func != SPCI_SUCCESS_32) {
+	while (smccc_return.func != FFA_SUCCESS_32) {
 
-		if (smccc_return.func == SPCI_ERROR_32) {
+		if (smccc_return.func == FFA_ERROR_32) {
 			switch (smccc_return.arg2) {
-			case SPCI_INVALID_PARAMETERS:
+			case FFA_INVALID_PARAMETERS:
 				return -ENXIO;
-			case SPCI_DENIED:
+			case FFA_DENIED:
 				return -EIO;
-			case SPCI_NO_MEMORY:
+			case FFA_NO_MEMORY:
 				return -ENOMEM;
-			case SPCI_ABORTED:
+			case FFA_ABORTED:
 				return -EAGAIN;
 			default:
 				pr_warn("%s: Unknown Error code %x\n", __func__,
@@ -191,9 +191,9 @@ static int spci_share_init_frag(void *buffer, u32 buffer_size,
 			}
 		}
 
-		if (smccc_return.func == SPCI_MEM_OP_PAUSE_32) {
+		if (smccc_return.func == FFA_MEM_OP_PAUSE_32) {
 
-			smccc_return = arm_spci_smccc(SPCI_MEM_OP_RESUME_32, smccc_return.arg1,
+			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
 				smccc_return.arg2, 0, 0, 0, 0, 0);
 		}
 	}
@@ -205,7 +205,7 @@ static int spci_share_init_frag(void *buffer, u32 buffer_size,
 
 static inline u32 compute_composite_offset(u32 num_attributes)
 {
-	u32 composite_offset = offsetof(struct spci_mem_region,
+	u32 composite_offset = offsetof(struct ffa_mem_region,
 		endpoints[num_attributes]);
 
 	/* ensure composite are 8 byte aligned. */
@@ -217,9 +217,9 @@ static inline u32 compute_composite_offset(u32 num_attributes)
 
 static inline u32 compute_constituent_offset(u32 num_attributes)
 {
-	u32 constituent_offset = offsetof(struct spci_mem_region,
+	u32 constituent_offset = offsetof(struct ffa_mem_region,
 		endpoints[num_attributes]) +
-		offsetof(struct spci_composite_memory_region, constituents[0]);
+		offsetof(struct ffa_composite_memory_region, constituents[0]);
 
 	/* ensure constituents are 8 byte aligned. */
 	if (constituent_offset & 0x7)
@@ -231,21 +231,21 @@ static inline u32 compute_constituent_offset(u32 num_attributes)
 static inline u32 compute_region_length(u32 num_constituents,
 	u32 num_attributes)
 {
-	/* This assumes that there is a single spci_composite_memory_region. */
+	/* This assumes that there is a single ffa_composite_memory_region. */
 	return compute_constituent_offset(num_attributes) +
-		sizeof(struct spci_mem_region_constituent)*num_constituents;
+		sizeof(struct ffa_mem_region_constituent)*num_constituents;
 }
 
-static int spci_rx_release(void)
+static int ffa_rx_release(void)
 {
 	struct arm_smcccv1_2_return rx_release_return;
 
-	rx_release_return = arm_spci_smccc(SPCI_RX_RELEASE_32,
+	rx_release_return = arm_ffa_smccc(FFA_RX_RELEASE_32,
 					      0, 0, 0, 0, 0, 0, 0);
 
-	if (rx_release_return.func == SPCI_ERROR_32) {
+	if (rx_release_return.func == FFA_ERROR_32) {
 		switch (rx_release_return.arg2) {
-		case SPCI_DENIED:
+		case FFA_DENIED:
 			return -EAGAIN;
 		default:
 			panic("%s: Unhandled return code (%lld)\n", __func__,
@@ -253,9 +253,9 @@ static int spci_rx_release(void)
 		}
 	}
 
-	if (rx_release_return.func == SPCI_RX_RELEASE_32) {
+	if (rx_release_return.func == FFA_RX_RELEASE_32) {
 		/*
-		 * SPCI implementation returned SPCI_RX_RELEASE which signals
+		 * FFA implementation returned FFA_RX_RELEASE which signals
 		 * the PVM that other VMs need to be scheduled.
 		 */
 		return 1;
@@ -264,7 +264,7 @@ static int spci_rx_release(void)
 	return 0;
 }
 
-static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
+static uint32_t ffa_get_num_pages_sg(struct scatterlist *sg)
 {
 	uint32_t num_pages = 0;
 	do {
@@ -274,41 +274,41 @@ static uint32_t spci_get_num_pages_sg(struct scatterlist *sg)
 	return num_pages;
 }
 
-static inline struct spci_memory_region_attribute spci_set_region_normal(
-	enum spci_mem_cacheability cacheability,
-	enum spci_mem_shareability shareability)
+static inline struct ffa_memory_region_attribute ffa_set_region_normal(
+	enum ffa_mem_cacheability cacheability,
+	enum ffa_mem_shareability shareability)
 {
-	struct spci_memory_region_attribute attr = {0};
+	struct ffa_memory_region_attribute attr = {0};
 
-	attr.attribute = (SPCI_MEM_NORMAL << SPCI_MEMTYPE_OFFSET) |
-		(cacheability << SPCI_CACHEABILITY_OFFSET) | shareability;
+	attr.attribute = (FFA_MEM_NORMAL << FFA_MEMTYPE_OFFSET) |
+		(cacheability << FFA_CACHEABILITY_OFFSET) | shareability;
 
 	return attr;
 }
 
-static inline struct spci_memory_region_attribute spci_set_region_device(
-	enum spci_mem_device_type device_type)
+static inline struct ffa_memory_region_attribute ffa_set_region_device(
+	enum ffa_mem_device_type device_type)
 {
-	struct spci_memory_region_attribute attr = {0};
+	struct ffa_memory_region_attribute attr = {0};
 
-	attr.attribute = (SPCI_MEM_DEVICE << SPCI_MEMTYPE_OFFSET) |
-		(device_type << SPCI_DEVICE_OFFSET);
+	attr.attribute = (FFA_MEM_DEVICE << FFA_MEMTYPE_OFFSET) |
+		(device_type << FFA_DEVICE_OFFSET);
 
 	return attr;
 }
 
-static inline int spci_transmit_fragment(u32 *tx_offset, void *buffer,
+static inline int ffa_transmit_fragment(u32 *tx_offset, void *buffer,
 	u32 buffer_size, u32 frag_len, u32 total_len, u64 *handle)
 {
 	int rc;
 
 	if(*tx_offset==0) {
-		rc = spci_share_init_frag(buffer, buffer_size,
+		rc = ffa_share_init_frag(buffer, buffer_size,
 			frag_len, total_len, handle);
 
 		*tx_offset = frag_len;
 	} else
-		rc = spci_share_next_frag(*handle, frag_len, tx_offset);
+		rc = ffa_share_next_frag(*handle, frag_len, tx_offset);
 
 
 	return rc;
@@ -318,44 +318,44 @@ static inline int spci_transmit_fragment(u32 *tx_offset, void *buffer,
  * Share a set of pages with a list of destination endpoints.
  * Returns a system-wide unique handle
  */
-static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
-	struct spci_mem_region_attributes *attrs,
+static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
+	struct ffa_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg, u32 nents,
-	spci_mem_handle_t *handle, void *buffer, uint32_t buffer_size)
+	ffa_mem_handle_t *handle, void *buffer, uint32_t buffer_size)
 {
-	struct spci_mem_region *mem_region;
+	struct ffa_mem_region *mem_region;
 	u32 index;
 	u32 num_constituents;
-	struct spci_mem_region_constituent *constituents;
+	struct ffa_mem_region_constituent *constituents;
 	struct arm_smcccv1_2_return smccc_return;
 	u32 total_len;
-	u32 fragment_len = sizeof(struct spci_mem_region);
+	u32 fragment_len = sizeof(struct ffa_mem_region);
 	u32 max_fragment_size;
 	int rc = 0;
 	u32 tx_offset = 0;
-	struct spci_composite_memory_region *composite = NULL;
+	struct ffa_composite_memory_region *composite = NULL;
 
 	if(buffer) {
 
 		BUG_ON(!buffer_size);
-		max_fragment_size = buffer_size * SPCI_BASE_GRANULE_SIZE;
+		max_fragment_size = buffer_size * FFA_BASE_GRANULE_SIZE;
 		mem_region = phys_to_virt(buffer);
 
 	} else {
 
 		BUG_ON(buffer_size);
-		mem_region = (struct spci_mem_region *)page_address(tx_buffer);
-		max_fragment_size = SPCI_BASE_GRANULE_SIZE;
+		mem_region = (struct ffa_mem_region *)page_address(tx_buffer);
+		max_fragment_size = FFA_BASE_GRANULE_SIZE;
 
 	}
 
 	mem_region->flags = flags;
 	mem_region->tag = tag;
 	mem_region->sender_id = vm_id;
-	mem_region->region_attr = spci_set_region_normal(SPCI_WRITE_BACK,
-		SPCI_OUTER_SHAREABLE);
-	composite = spci_get_composite(mem_region, num_attrs);
-	composite->total_page_count = spci_get_num_pages_sg(sg);
+	mem_region->region_attr = ffa_set_region_normal(FFA_WRITE_BACK,
+		FFA_OUTER_SHAREABLE);
+	composite = ffa_get_composite(mem_region, num_attrs);
+	composite->total_page_count = ffa_get_num_pages_sg(sg);
 
 	fragment_len = compute_constituent_offset(num_attrs);
 
@@ -363,7 +363,7 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 	if (fragment_len > max_fragment_size)
 		return -ENXIO;
 
-	constituents = (struct spci_mem_region_constituent *)
+	constituents = (struct ffa_mem_region_constituent *)
 		(((void *)mem_region) + fragment_len);
 
 	composite->constituent_count = nents;
@@ -391,14 +391,14 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 		if (fragment_len == max_fragment_size) {
 
 			/* Transmit fragment. */
-			rc = spci_transmit_fragment(&tx_offset, buffer, buffer_size,
+			rc = ffa_transmit_fragment(&tx_offset, buffer, buffer_size,
 				fragment_len, total_len, handle);
 
 			if (rc < 0)
 				return -ENXIO;
 
 
-			constituents = (struct spci_mem_region_constituent *)mem_region;
+			constituents = (struct ffa_mem_region_constituent *)mem_region;
 			num_constituents = 0;
 			fragment_len = 0;
 
@@ -418,17 +418,17 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
 			return -EFAULT;
 		}
 
-		pr_devel("arm_spci mem_share pa=%#lX\n", address);
+		pr_devel("arm_ffa mem_share pa=%#lX\n", address);
 
 		constituents[num_constituents].address = address;
 		constituents[num_constituents].page_count = sg->length/PAGE_SIZE;
 		num_constituents++;
-		fragment_len += sizeof(struct spci_mem_region_constituent);
+		fragment_len += sizeof(struct ffa_mem_region_constituent);
 
 
 	} while((sg = sg_next(sg)));
 
-	rc = spci_transmit_fragment(&tx_offset, buffer, buffer_size,
+	rc = ffa_transmit_fragment(&tx_offset, buffer, buffer_size,
 		fragment_len, total_len, handle);
 
 	return rc;
@@ -439,10 +439,10 @@ static int _spci_share_memory(u32 tag, enum mem_clear_t flags,
  *
  * Returns a system-wide unique handle
  */
-static int spci_share_memory(u32 tag, enum mem_clear_t flags,
-	struct spci_mem_region_attributes *attrs,
+static int ffa_share_memory(u32 tag, enum mem_clear_t flags,
+	struct ffa_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg, u32 nents,
-	spci_mem_handle_t *global_handle, bool use_tx)
+	ffa_mem_handle_t *global_handle, bool use_tx)
 {
 	u32 buffer_size = 0;
 	void *buffer_pa = NULL;
@@ -468,7 +468,7 @@ static int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	if (use_tx)
 		mutex_lock(&tx_lock);
 
-	ret = _spci_share_memory(tag, flags, attrs, num_attrs, sg, nents,
+	ret = _ffa_share_memory(tag, flags, attrs, num_attrs, sg, nents,
 		global_handle, buffer_pa, buffer_size);
 
 	if (use_tx)
@@ -477,24 +477,24 @@ static int spci_share_memory(u32 tag, enum mem_clear_t flags,
 	return ret;
 }
 
-static int spci_memory_reclaim(spci_mem_handle_t global_handle,
+static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
 	enum mem_clear_t flags) {
 
 	struct arm_smcccv1_2_return smccc_return;
 
-	smccc_return = arm_spci_smccc(SPCI_MEM_RECLAIM_32, global_handle, flags,
+	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, global_handle, flags,
 			     0, 0, 0, 0, 0);
 
-	if (smccc_return.func == SPCI_ERROR_32) {
+	if (smccc_return.func == FFA_ERROR_32) {
 		pr_err("%s: Error sending message %llu\n", __func__,
 			smccc_return.func);
 		switch (smccc_return.arg2) {
-		case SPCI_INVALID_PARAMETERS:
+		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
-		case SPCI_DENIED:
-		case SPCI_NOT_SUPPORTED:
+		case FFA_DENIED:
+		case FFA_NOT_SUPPORTED:
 			return -EIO;
-		case SPCI_BUSY:
+		case FFA_BUSY:
 			return -EAGAIN;
 		default:
 			pr_warn("%s: Unknown Error code %x\n", __func__,
@@ -511,14 +511,14 @@ static int spci_memory_reclaim(spci_mem_handle_t global_handle,
  * supplying optional feature parameter else 0.
 */
 
-static int spci_features(uint32_t function_id)
+static int ffa_features(uint32_t function_id)
 {
 	struct arm_smcccv1_2_return features_return =
-		arm_spci_smccc(SPCI_FEATURES_32, function_id, 0, 0, 0, 0, 0, 0);
+		arm_ffa_smccc(FFA_FEATURES_32, function_id, 0, 0, 0, 0, 0, 0);
 
-	if (features_return.func == SPCI_ERROR_32) {
+	if (features_return.func == FFA_ERROR_32) {
 		switch (features_return.arg2){
-		case SPCI_NOT_SUPPORTED:
+		case FFA_NOT_SUPPORTED:
 			return -ENODEV;
 		default:
 			panic("%s: Unhandled return code (%lld)\n", __func__,
@@ -530,41 +530,41 @@ static int spci_features(uint32_t function_id)
 	}
 }
 
-static spci_sp_id_t spci_id_get(void)
+static ffa_sp_id_t ffa_id_get(void)
 {
 	struct  arm_smcccv1_2_return id_get_return =
-		arm_spci_smccc(SPCI_ID_GET_32, 0, 0, 0, 0, 0, 0, 0);
+		arm_ffa_smccc(FFA_ID_GET_32, 0, 0, 0, 0, 0, 0, 0);
 
-	if (id_get_return.func == SPCI_ERROR_32)
+	if (id_get_return.func == FFA_ERROR_32)
 		panic("%s: failed to obtain vm id\n", __func__);
 	else
 		return id_get_return.arg2 & 0xffff;
 }
 
-static int spci_partition_info_get(uint32_t uuid0, uint32_t uuid1,
+static int ffa_partition_info_get(uint32_t uuid0, uint32_t uuid1,
 				     uint32_t uuid2, uint32_t uuid3,
-				     struct spci_partition_info **buffer)
+				     struct ffa_partition_info **buffer)
 {
 	int rc = 0;
 	uint32_t count;
-	struct spci_partition_info *info =
-		(struct spci_partition_info *) page_address(rx_buffer);
+	struct ffa_partition_info *info =
+		(struct ffa_partition_info *) page_address(rx_buffer);
 	struct arm_smcccv1_2_return partition_info_get_return;
 
 	mutex_lock(&rx_lock);
-	partition_info_get_return = arm_spci_smccc(SPCI_PARTITION_INFO_GET_32,
+	partition_info_get_return = arm_ffa_smccc(FFA_PARTITION_INFO_GET_32,
 						   uuid0, uuid1, uuid2, uuid3,
 						   0, 0, 0);
 
-	if (partition_info_get_return.func == SPCI_ERROR_32) {
+	if (partition_info_get_return.func == FFA_ERROR_32) {
 		switch (partition_info_get_return.arg2) {
-		case SPCI_INVALID_PARAMETERS:
+		case FFA_INVALID_PARAMETERS:
 			rc = -ENXIO;
 			goto err;
-		case SPCI_NO_MEMORY:
+		case FFA_NO_MEMORY:
 			rc = -ENOMEM;
 			goto err;
-		case SPCI_NOT_SUPPORTED:
+		case FFA_NOT_SUPPORTED:
 			rc = -ENODEV;
 			goto err;
 		default:
@@ -578,15 +578,15 @@ static int spci_partition_info_get(uint32_t uuid0, uint32_t uuid1,
 	/* Allocate and copy the info structs.
 	 * Client is responsible for freeing.
 	 */
-	*buffer = kzalloc(sizeof(struct spci_partition_info) * count,
+	*buffer = kzalloc(sizeof(struct ffa_partition_info) * count,
 			  GFP_KERNEL);
 	if (*buffer == NULL) {
 		rc = -ENOMEM;
 		goto err;
 	}
-	memcpy(*buffer, info, sizeof(struct spci_partition_info) * count);
+	memcpy(*buffer, info, sizeof(struct ffa_partition_info) * count);
 
-	rc = spci_rx_release();
+	rc = ffa_rx_release();
 	if (rc)
 		panic("%s: Unhandled return code (%lld)\n", __func__, rc);
 
@@ -597,63 +597,63 @@ err:
 	return rc;
 }
 
-static struct spci_ops spci_ops = {
-	.async_msg_send = spci_msg_send,
-	.sync_msg_send = spci_msg_send_direct_req,
-	.mem_share = spci_share_memory,
-	.mem_reclaim = spci_memory_reclaim,
-	.partition_info_get = spci_partition_info_get,
+static struct ffa_ops ffa_ops = {
+	.async_msg_send = ffa_msg_send,
+	.sync_msg_send = ffa_msg_send_direct_req,
+	.mem_share = ffa_share_memory,
+	.mem_reclaim = ffa_memory_reclaim,
+	.partition_info_get = ffa_partition_info_get,
 };
 
-struct spci_ops *get_spci_ops(void)
+struct ffa_ops *get_ffa_ops(void)
 {
-	return &spci_ops;
+	return &ffa_ops;
 }
-EXPORT_SYMBOL_GPL(get_spci_ops);
+EXPORT_SYMBOL_GPL(get_ffa_ops);
 
-static int spci_dt_init(struct device_node *np)
+static int ffa_dt_init(struct device_node *np)
 {
 	const char *conduit;
 	const char *selected_buffer;
 
-	pr_info("SPCI: obtaining conduit from DT.\n");
+	pr_info("FFA: obtaining conduit from DT.\n");
 
 	if (of_property_read_string(np, "conduit", &conduit)) {
-		pr_warn("SPCI: cannot find conduit in DT\n");
+		pr_warn("FFA: cannot find conduit in DT\n");
 		return -ENXIO;
 	}
 
 	if (!strcmp("smc", conduit))
-		arm_spci_smccc = arm_spci_smc;
+		arm_ffa_smccc = arm_ffa_smc;
 	else if (!strcmp("hvc", conduit))
-		arm_spci_smccc = arm_spci_hvc;
+		arm_ffa_smccc = arm_ffa_hvc;
 	else
-		panic("%s: unrecognized SPCI conduit\n", __func__);
+		panic("%s: unrecognized FFA conduit\n", __func__);
 
 	return 0;
 }
 
-static const struct of_device_id spci_of_match[] = {
-	{.compatible = "arm,spci"},
+static const struct of_device_id ffa_of_match[] = {
+	{.compatible = "arm,ffa"},
 	{},
 };
 
-static int spci_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
+static int ffa_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
 {
 	struct arm_smcccv1_2_return map_return;
 
-	map_return = arm_spci_smccc(SPCI_RXTX_MAP_32, tx_page,
+	map_return = arm_ffa_smccc(FFA_RXTX_MAP_32, tx_page,
 					 rx_page, 1, 0, 0, 0, 0);
 
-	if (map_return.func == SPCI_ERROR_32) {
+	if (map_return.func == FFA_ERROR_32) {
 		switch (map_return.arg2) {
-		case SPCI_INVALID_PARAMETERS:
+		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
-		case SPCI_DENIED:
+		case FFA_DENIED:
 			return -EAGAIN;
-		case SPCI_NO_MEMORY:
+		case FFA_NO_MEMORY:
 			return -ENOMEM;
-		case SPCI_NOT_SUPPORTED:
+		case FFA_NOT_SUPPORTED:
 			return -ENODEV;
 
 		default:
@@ -665,18 +665,18 @@ static int spci_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
 	return 0;
 }
 
-static int spci_probe(struct platform_device *pdev)
+static int ffa_probe(struct platform_device *pdev)
 {
 	int ret;
 
-	spci_dt_init(pdev->dev.of_node);
+	ffa_dt_init(pdev->dev.of_node);
 
 	/* Initialize VM ID. */
-	vm_id = spci_id_get();
+	vm_id = ffa_id_get();
 
-	if (spci_features(SPCI_MSG_SEND_DIRECT_REQ_32)) {
-		pr_err("%s: SPCI implementation at EL2 does not support"
-			" SPCI_MSG_SEND_DIRECT_REQ_32\n", __func__);
+	if (ffa_features(FFA_MSG_SEND_DIRECT_REQ_32)) {
+		pr_err("%s: FFA implementation at EL2 does not support"
+			" FFA_MSG_SEND_DIRECT_REQ_32\n", __func__);
 		return -ENXIO;
 	}
 
@@ -688,7 +688,7 @@ static int spci_probe(struct platform_device *pdev)
 	 * incremented.
 	 */
 	if (!rx_buffer || !try_get_page(rx_buffer)) {
-		pr_err("%s: failed to allocate SPCI Rx buffer\n", __func__);
+		pr_err("%s: failed to allocate FFA Rx buffer\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -703,34 +703,34 @@ static int spci_probe(struct platform_device *pdev)
 		put_page(rx_buffer);
 		__free_page(rx_buffer);
 
-		pr_err("%s: failed to allocate SPCI Tx buffer\n", __func__);
+		pr_err("%s: failed to allocate FFA Tx buffer\n", __func__);
 		return -ENOMEM;
 	}
 
-	/* Register the RxTx buffers with the SPCI supervisor implementation. */
-	ret = spci_rxtx_map(page_to_phys(tx_buffer), page_to_phys(rx_buffer));
+	/* Register the RxTx buffers with the FFA supervisor implementation. */
+	ret = ffa_rxtx_map(page_to_phys(tx_buffer), page_to_phys(rx_buffer));
 	if (ret) {
 		put_page(rx_buffer);
 		put_page(tx_buffer);
 		__free_page(rx_buffer);
 		__free_page(tx_buffer);
 
-		pr_err("%s: failed to register SPCI RxTx buffers\n", __func__);
+		pr_err("%s: failed to register FFA RxTx buffers\n", __func__);
 		return ret;
 	}
 
 	return 0;
 }
 
-static struct platform_driver spci_driver = {
+static struct platform_driver ffa_driver = {
 	.driver = {
-		.name = "spci_protocol",
-		.of_match_table = spci_of_match,
+		.name = "ffa_protocol",
+		.of_match_table = ffa_of_match,
 	},
-	.probe = spci_probe,
+	.probe = ffa_probe,
 };
-module_platform_driver(spci_driver);
+module_platform_driver(ffa_driver);
 
 MODULE_AUTHOR("Arm");
-MODULE_DESCRIPTION("Arm SPCI transport driver");
+MODULE_DESCRIPTION("Arm FFA transport driver");
 MODULE_LICENSE("GPL v2");

@@ -13,7 +13,7 @@
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
 #include "optee_smc.h"
-#include "optee_spci.h"
+#include "optee_ffa.h"
 
 struct wq_entry {
 	struct list_head link;
@@ -449,8 +449,8 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
 }
 
-#ifdef CONFIG_ARM_SPCI_TRANSPORT
-static void handle_spci_rpc_func_cmd(struct tee_context *ctx,
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static void handle_ffa_rpc_func_cmd(struct tee_context *ctx,
 				     struct optee *optee,
 				     struct optee_msg_arg *arg)
 {
@@ -475,7 +475,7 @@ static void handle_spci_rpc_func_cmd(struct tee_context *ctx,
 	}
 }
 
-void optee_handle_spci_rpc(struct tee_context *ctx,
+void optee_handle_ffa_rpc(struct tee_context *ctx,
 			   u32 w4, u32 w5, u32 *w6, u32 *w7)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
@@ -484,10 +484,10 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 	u32 global_handle = 0;
 
 	switch (w4) {
-	case OPTEE_SPCI_YIELDING_CALL_RETURN_ALLOC_SHM:
-		if (*w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_SHM:
+		if (*w7 == OPTEE_FFA_SHM_TYPE_APPLICATION)
 			shm = cmd_alloc_suppl(ctx, *w6 * PAGE_SIZE);
-		else if (*w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+		else if (*w7 == OPTEE_FFA_SHM_TYPE_KERNEL)
 			shm = tee_shm_alloc(ctx, *w6 * PAGE_SIZE,
 					    TEE_SHM_MAPPED);
 		else
@@ -501,29 +501,29 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 			*w7 = 0;
 		}
 		break;
-	case OPTEE_SPCI_YIELDING_CALL_RETURN_FREE_SHM:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_SHM:
 		global_handle = *w6;
 		*w6 = 0;
-		shm = optee_shm_from_spci_handle(optee, global_handle);
+		shm = optee_shm_from_ffa_handle(optee, global_handle);
 		if (!shm) {
 			pr_err("Invalid global handle 0x%x\n", global_handle);
 			*w7 = 0;
 			break;
 		}
 
-		if (*w7 == OPTEE_SPCI_SHM_TYPE_APPLICATION)
+		if (*w7 == OPTEE_FFA_SHM_TYPE_APPLICATION)
 			cmd_free_suppl(ctx, shm);
-		else if (*w7 == OPTEE_SPCI_SHM_TYPE_KERNEL)
+		else if (*w7 == OPTEE_FFA_SHM_TYPE_KERNEL)
 			tee_shm_free(shm);
 		else
 			pr_info("unknown shm type %u", *w7);
 
 		*w7 = 0;
 		break;
-	case OPTEE_SPCI_YIELDING_CALL_RETURN_RPC_CMD:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_RPC_CMD:
 		global_handle = *w6;
 		*w6 = 0;
-		shm = optee_shm_from_spci_handle(optee, global_handle);
+		shm = optee_shm_from_ffa_handle(optee, global_handle);
 		if (!shm) {
 			pr_err("Invalid global handle 0x%x\n", global_handle);
 			break;
@@ -535,10 +535,10 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 			*w7 = 0;
 			break;
 		}
-		handle_spci_rpc_func_cmd(ctx, optee, rpc_arg);
+		handle_ffa_rpc_func_cmd(ctx, optee, rpc_arg);
 		*w7 = 0;
 		break;
-	case OPTEE_SPCI_YIELDING_CALL_RETURN_INTERRUPT:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_INTERRUPT:
 		/* Interrupt delivered by now */
 		break;
 	default:
@@ -546,4 +546,4 @@ void optee_handle_spci_rpc(struct tee_context *ctx,
 		break;
 	}
 }
-#endif /*CONFIG_ARM_SPCI_TRANSPORT*/
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/
