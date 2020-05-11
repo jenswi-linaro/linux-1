@@ -9,7 +9,7 @@
 #define FFA_ERROR_32                 0x84000060
 #define FFA_SUCCESS_32               0x84000061
 #define FFA_INTERRUPT_32             0x84000062
-
+#define FFA_VERSION_32               0x84000063
 #define FFA_FEATURES_32              0x84000064
 #define FFA_RX_RELEASE_32            0x84000065
 #define FFA_RXTX_MAP_32              0x84000066

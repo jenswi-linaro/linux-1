@@ -665,11 +665,41 @@ static int ffa_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
 	return 0;
 }
 
+static int ffa_version_check()
+{
+	struct arm_smcccv1_2_return version_return;
+	u16 major = 1;
+	u16 minor = 0;
+	u32 hv_version;
+
+	version_return = arm_ffa_smccc(FFA_VERSION_32, ((u32)major<<16)|minor,
+		 0, 0, 0, 0, 0, 0);
+
+	if (version_return.func == FFA_NOT_SUPPORTED)
+	{
+		pr_err("%s: FFA ABI is not supported at higher exception levels\n", __func__);
+		return -ENODEV;
+	}
+
+	hv_version = version_return.arg1;
+
+	if ((hv_version>>16) == major)
+		if((hv_version & 0xffff) >= minor)
+			return 0;
+
+	pr_err("%s: incompatible FFA ABI at higher exception level (%x)\n", __func__, hv_version);
+	return -ENODEV;
+}
+
 static int ffa_probe(struct platform_device *pdev)
 {
 	int ret;
 
 	ffa_dt_init(pdev->dev.of_node);
+
+	ret = ffa_version_check();
+	if (ret)
+		return ret;
 
 	/* Initialize VM ID. */
 	vm_id = ffa_id_get();
