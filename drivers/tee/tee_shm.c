@@ -185,6 +185,7 @@ err_dev_put:
 	tee_device_put(teedev);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(tee_shm_alloc);
 
 struct tee_shm *tee_shm_register(struct tee_context *ctx, unsigned long addr,
 				 size_t length, u32 flags)
