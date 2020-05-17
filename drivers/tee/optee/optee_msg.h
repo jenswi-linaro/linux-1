@@ -127,19 +127,19 @@ struct optee_msg_param_rmem {
 
 /**
  * struct optee_msg_param_smem - ffa memory reference parameter
- * @offs:	   Offset into shared memory reference
- * @size:          Size of the buffer
+ * @offs_lower:	   Lower bits of offset into shared memory reference
+ * @offs_upper:	   Upper bits of offset into shared memory reference
  * @internal_offs: Internal offset into the first page of shared memory
- *                 reference
- * @page_count:    Page count of shared memory reference
- * @global_id:     Global identifier of Shared memory
+ *		   reference
+ * @size:	   Size of the buffer
+ * @global_id:	   Global identifier of Shared memory
  */
 struct optee_msg_param_smem {
-	u64 offs;
-	u64 size;
+	u32 offs_low;
+	u16 offs_high;
 	u16 internal_offs;
-	u16 page_count;
-	u32 global_id;
+	u64 size;
+	u64 global_id;
 };
 
 /**

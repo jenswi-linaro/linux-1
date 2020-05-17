@@ -475,75 +475,68 @@ static void handle_ffa_rpc_func_cmd(struct tee_context *ctx,
 	}
 }
 
-void optee_handle_ffa_rpc(struct tee_context *ctx,
-			   u32 w4, u32 w5, u32 *w6, u32 *w7)
+void optee_handle_ffa_rpc(struct tee_context *ctx, u32 *w4, u32 *w5, u32 *w6)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct tee_shm *shm = NULL;
 	struct optee_msg_arg *rpc_arg = NULL;
-	u32 global_handle = 0;
+	u64 global_handle = 0;
+	u32 cmd = *w4;
 
-	switch (w4) {
-	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_SHM:
-		if (*w7 == OPTEE_FFA_SHM_TYPE_APPLICATION)
-			shm = cmd_alloc_suppl(ctx, *w6 * PAGE_SIZE);
-		else if (*w7 == OPTEE_FFA_SHM_TYPE_KERNEL)
-			shm = tee_shm_alloc(ctx, *w6 * PAGE_SIZE,
+	switch (cmd) {
+	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_KERN_SHM:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_SUPPL_SHM:
+		if (cmd == OPTEE_FFA_YIELDING_CALL_RETURN_ALLOC_KERN_SHM)
+			shm = tee_shm_alloc(ctx, *w5 * PAGE_SIZE,
 					    TEE_SHM_MAPPED);
 		else
-			pr_info("unknown shm type %u", *w7);
+			shm = cmd_alloc_suppl(ctx, *w5 * PAGE_SIZE);
 
-		if (!IS_ERR_OR_NULL(shm)) {
-			*w6 = shm->sec_world_id;
-			*w7 = shm->offset;
-		} else {
-			*w6 = 0;
-			*w7 = 0;
-		}
-		break;
-	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_SHM:
-		global_handle = *w6;
-		*w6 = 0;
+		if (IS_ERR_OR_NULL(shm))
+			break;
+
+		*w4 = shm->sec_world_id;
+		*w5 = shm->sec_world_id >> 32;
+		*w6 = shm->offset;
+		return;
+	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_KERN_SHM:
+	case OPTEE_FFA_YIELDING_CALL_RETURN_FREE_SUPPL_SHM:
+		global_handle = *w5 | ((u64)*w6 << 32);
 		shm = optee_shm_from_ffa_handle(optee, global_handle);
 		if (!shm) {
-			pr_err("Invalid global handle 0x%x\n", global_handle);
-			*w7 = 0;
+			pr_err("Invalid global handle 0x%llx\n", global_handle);
 			break;
 		}
-
-		if (*w7 == OPTEE_FFA_SHM_TYPE_APPLICATION)
-			cmd_free_suppl(ctx, shm);
-		else if (*w7 == OPTEE_FFA_SHM_TYPE_KERNEL)
+		if (cmd == OPTEE_FFA_YIELDING_CALL_RETURN_FREE_KERN_SHM)
 			tee_shm_free(shm);
 		else
-			pr_info("unknown shm type %u", *w7);
-
-		*w7 = 0;
+			cmd_free_suppl(ctx, shm);
 		break;
 	case OPTEE_FFA_YIELDING_CALL_RETURN_RPC_CMD:
-		global_handle = *w6;
-		*w6 = 0;
+		global_handle = *w5 | ((u64)*w6 << 32);
 		shm = optee_shm_from_ffa_handle(optee, global_handle);
 		if (!shm) {
-			pr_err("Invalid global handle 0x%x\n", global_handle);
+			pr_err("Invalid global handle 0x%llx\n", global_handle);
 			break;
 		}
-		rpc_arg = tee_shm_get_va(shm, *w7);
+		rpc_arg = tee_shm_get_va(shm, 0);
 		if (IS_ERR(rpc_arg)) {
-			pr_err("Invalid offset 0x%x for global handle 0x%x\n",
-			       *w7, global_handle);
-			*w7 = 0;
+			pr_err("Invalid offset 0 for global handle 0x%llx\n",
+			       global_handle);
 			break;
 		}
 		handle_ffa_rpc_func_cmd(ctx, optee, rpc_arg);
-		*w7 = 0;
 		break;
 	case OPTEE_FFA_YIELDING_CALL_RETURN_INTERRUPT:
 		/* Interrupt delivered by now */
 		break;
 	default:
-		pr_warn("Unknown RPC func 0x%x\n", w4);
+		pr_warn("Unknown RPC func 0x%x\n", cmd);
 		break;
 	}
+
+	*w4 = 0;
+	*w5 = 0;
+	*w6 = 0;
 }
 #endif /*CONFIG_ARM_FFA_TRANSPORT*/
