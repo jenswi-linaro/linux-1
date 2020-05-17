@@ -196,7 +196,7 @@ struct tee_shm {
 	struct dma_buf *dmabuf;
 	u32 flags;
 	int id;
-	u32 sec_world_id;
+	u64 sec_world_id;
 };
 
 /**
