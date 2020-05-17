@@ -7,6 +7,7 @@
 #define OPTEE_PRIVATE_H
 
 #include <linux/arm-smccc.h>
+#include <linux/rhashtable.h>
 #include <linux/semaphore.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
@@ -70,14 +71,14 @@ struct optee_supp {
  * struct optee_ffa_data -  FFA communication struct
  * @dst			FFA destination id, the id of OP-TEE in secure world
  * @ops			FFA operations
- * @mutex		Serializes access to @idr
- * @idr			FFA shared memory global handle translation
+ * @mutex		Serializes access to @global_ids
+ * @global_ids		FF-A shared memory global handle translation
  */
 struct optee_ffa {
 	u32 dst;
 	struct ffa_ops *ops;
 	struct mutex mutex;
-	struct idr idr;
+	struct rhashtable global_ids;
 };
 
 struct optee;
@@ -203,10 +204,10 @@ void optee_fill_pages_list(u64 *dst, struct page **pages, int num_pages,
 int optee_enumerate_devices(void);
 
 int optee_shm_add_ffa_handle(struct optee *optee, struct tee_shm *shm,
-			      u32 global_handle);
-int optee_shm_rem_ffa_handle(struct optee *optee, u32 global_handle);
-struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee,
-					   u32 global_handle);
+			     u64 global_id);
+int optee_shm_rem_ffa_handle(struct optee *optee, u64 global_id);
+
+struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee, u64 global_id);
 void optee_ffa_disable_shm_cache(struct optee *optee);
 
 int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
@@ -221,8 +222,7 @@ int optee_ffa_shm_unregister_supp(struct tee_context *ctx,
 
 int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
 int optee_ffa_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
-void optee_handle_ffa_rpc(struct tee_context *ctx,
-			   u32 w4, u32 w5, u32 *w6, u32 *w7);
+void optee_handle_ffa_rpc(struct tee_context *ctx, u32 *w4, u32 *w5, u32 *w6);
 
 /*
  * Small helpers

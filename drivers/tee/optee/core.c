@@ -30,38 +30,76 @@
 #define OPTEE_SHM_NUM_PRIV_PAGES	CONFIG_OPTEE_SHM_NUM_PRIV_PAGES
 
 #ifdef CONFIG_ARM_FFA_TRANSPORT
-struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee,
-					   u32 global_handle)
+struct shm_rhash {
+	struct tee_shm *shm;
+	u64 global_id;
+	struct rhash_head linkage;
+};
+
+static void rh_free_fn(void *ptr, void *arg)
 {
+	kfree(ptr);
+}
+
+static const struct rhashtable_params shm_rhash_params = {
+	.head_offset = offsetof(struct shm_rhash, linkage),
+	.key_len     = sizeof(u64),
+	.key_offset  = offsetof(struct shm_rhash, global_id),
+	.automatic_shrinking = true,
+};
+
+struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee, u64 global_id)
+{
+	struct shm_rhash *r = NULL;
 	struct tee_shm *shm = NULL;
 
 	mutex_lock(&optee->ffa.mutex);
-	shm = idr_find(&optee->ffa.idr, global_handle);
+	r = rhashtable_lookup_fast(&optee->ffa.global_ids, &global_id,
+				   shm_rhash_params);
+	if (r)
+		shm = r->shm;
 	mutex_unlock(&optee->ffa.mutex);
 
 	return shm;
 }
 
 int optee_shm_add_ffa_handle(struct optee *optee, struct tee_shm *shm,
-			      u32 global_handle)
+			      u64 global_id)
 {
-	u32 id = global_handle;
+	struct shm_rhash *r = NULL;
 	int rc = 0;
 
+	r = kmalloc(sizeof(*r), GFP_KERNEL);
+	if (!r)
+		return -ENOMEM;
+	r->shm = shm;
+	r->global_id = global_id;
+
 	mutex_lock(&optee->ffa.mutex);
-	rc = idr_alloc_u32(&optee->ffa.idr, shm, &id, id, GFP_KERNEL);
+	rc = rhashtable_lookup_insert_fast(&optee->ffa.global_ids, &r->linkage,
+					   shm_rhash_params);
 	mutex_unlock(&optee->ffa.mutex);
+
+	if (rc)
+		kfree(r);
 
 	return rc;
 }
 
-int optee_shm_rem_ffa_handle(struct optee *optee, u32 global_handle)
+int optee_shm_rem_ffa_handle(struct optee *optee, u64 global_id)
 {
-	int rc = 0;
+	struct shm_rhash *r = NULL;
+	int rc = -ENOENT;
 
 	mutex_lock(&optee->ffa.mutex);
-	if (!idr_remove(&optee->ffa.idr, global_handle))
-		rc = -ENOENT;
+	r = rhashtable_lookup_fast(&optee->ffa.global_ids, &global_id,
+				   shm_rhash_params);
+	if (r) {
+		rc = rhashtable_remove_fast(&optee->ffa.global_ids,
+					    &r->linkage, shm_rhash_params);
+		if (!rc)
+			kfree(r);
+	}
 	mutex_unlock(&optee->ffa.mutex);
 
 	return rc;
@@ -284,16 +322,19 @@ static void from_msg_param_ffa_mem(struct optee *optee, struct tee_param *p,
 				    u32 attr, const struct optee_msg_param *mp)
 {
 	struct tee_shm *shm = NULL;
+	u64 offs_high = 0;
+	u64 offs_low = 0;
 
 	p->attr = TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT +
 		  attr - OPTEE_MSG_ATTR_TYPE_SMEM_INPUT;
 	p->u.memref.size = mp->u.smem.size;
 	shm = optee_shm_from_ffa_handle(optee, mp->u.smem.global_id);
 	p->u.memref.shm = shm;
-	if (shm)
-		p->u.memref.shm_offs = mp->u.smem.offs;
-	else
-		p->u.memref.shm_offs = 0;
+	if (shm) {
+		offs_low = mp->u.smem.offs_low;
+		offs_high = mp->u.smem.offs_high;
+	}
+	p->u.memref.shm_offs = offs_low | offs_high << 32;
 }
 
 /**
@@ -347,22 +388,16 @@ static int to_msg_param_ffa_mem(struct optee_msg_param *mp,
 		   TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT;
 
 	if (shm) {
-		size_t page_count = shm->num_pages;
+		u64 shm_offs = p->u.memref.shm_offs;
 
-		mp->u.smem.offs = p->u.memref.shm_offs;
 		mp->u.smem.internal_offs = shm->offset;
-		if (!page_count)
-			page_count = roundup(shm->size, PAGE_SIZE) / PAGE_SIZE;
-		/*
-		 * If the page count is too large for the page_count field
-		 * it can't be represented here. Set it to 0 instead to
-		 * indicate that this shared memory object is supposed to
-		 * have been pre-registered.
-		 */
-		if (page_count >= U16_MAX)
-			page_count = 0;
 
-		mp->u.smem.page_count = page_count;
+		mp->u.smem.offs_low = shm_offs;
+		mp->u.smem.offs_high = shm_offs >> 32;
+		/* Check that the entire offset could be stored. */
+		if (mp->u.smem.offs_high != shm_offs >> 32)
+			return -EINVAL;
+
 		mp->u.smem.global_id = shm->sec_world_id;
 	} else {
 		memset(&mp->u, 0, sizeof(mp->u));
@@ -383,7 +418,6 @@ static int optee_ffa_to_msg_param(struct optee *optee,
 				   size_t num_params,
 				   const struct tee_param *params)
 {
-	int rc;
 	size_t n;
 
 	for (n = 0; n < num_params; n++) {
@@ -403,9 +437,8 @@ static int optee_ffa_to_msg_param(struct optee *optee,
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_OUTPUT:
 		case TEE_IOCTL_PARAM_ATTR_TYPE_MEMREF_INOUT:
-			rc = to_msg_param_ffa_mem(mp, p);
-			if (rc)
-				return rc;
+			if (to_msg_param_ffa_mem(mp, p))
+				return -EINVAL;
 			break;
 		default:
 			return -EINVAL;
@@ -876,9 +909,9 @@ static bool optee_ffa_api_is_compatbile(struct ffa_ops *ffa_ops, u32 dst)
 	struct arm_smcccv1_2_return ret = { };
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_GET_API_VERSION,
-				      0, 0, 0, 0);
-	if (ret.arg0 != FFA_SUCCESS) {
-		pr_err("Unexpected return fid 0x%llx", ret.arg0);
+				     0, 0, 0, 0);
+	if (ret.func != FFA_SUCCESS) {
+		pr_err("Unexpected return fid 0x%llx", ret.func);
 		return false;
 	}
 	if (ret.arg3 != OPTEE_FFA_VERSION_MAJOR ||
@@ -889,9 +922,9 @@ static bool optee_ffa_api_is_compatbile(struct ffa_ops *ffa_ops, u32 dst)
 	}
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_GET_OS_VERSION,
-				      0, 0, 0, 0);
-	if (ret.arg0) {
-		pr_err("Unexpected error 0x%llx", ret.arg0);
+				     0, 0, 0, 0);
+	if (ret.func) {
+		pr_err("Unexpected error 0x%llx", ret.func);
 		return false;
 	}
 	if (ret.arg5)
@@ -909,9 +942,9 @@ static bool optee_ffa_exchange_caps(struct ffa_ops *ffa_ops, u32 dst,
 	struct arm_smcccv1_2_return ret = { };
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_EXCHANGE_CAPABILITIES,
-				      0, 0, 0, 0);
-	if (ret.arg0) {
-		pr_err("Unexpected error 0x%llx", ret.arg0);
+				     0, 0, 0, 0);
+	if (ret.func) {
+		pr_err("Unexpected error 0x%llx", ret.func);
 		return false;
 	}
 
@@ -1076,7 +1109,9 @@ static struct optee *optee_probe_ffa(void)
 	if (rc)
 		goto err;
 
-	idr_init(&optee->ffa.idr);
+	rc = rhashtable_init(&optee->ffa.global_ids, &shm_rhash_params);
+	if (rc)
+		goto err;
 	mutex_init(&optee->ffa.mutex);
 	mutex_init(&optee->call_queue.mutex);
 	INIT_LIST_HEAD(&optee->call_queue.waiters);
@@ -1084,8 +1119,6 @@ static struct optee *optee_probe_ffa(void)
 	optee_supp_init(&optee->supp);
 
 	return optee;
-
-
 err:
 	/*
 	 * tee_device_unregister() is safe to call even if the
@@ -1158,7 +1191,8 @@ static void optee_remove(struct optee *optee)
 #ifdef CONFIG_ARM_FFA_TRANSPORT
 	if (optee->ffa.ops) {
 		mutex_destroy(&optee->ffa.mutex);
-		idr_destroy(&optee->ffa.idr);
+		rhashtable_free_and_destroy(&optee->ffa.global_ids,
+					    rh_free_fn, NULL);
 	}
 #endif /*CONFIG_ARM_FFA_TRANSPORT*/
 

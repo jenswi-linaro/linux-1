@@ -696,15 +696,16 @@ int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 }
 
 #ifdef CONFIG_ARM_FFA_TRANSPORT
-static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
-				    u32 w6, u32 w7)
+static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w3, u32 w4,
+				    u32 w5)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
 	struct arm_smcccv1_2_return ret = { };
 	const u32 dst = optee->ffa.dst;
 	struct optee_call_waiter w;
+	u32 w6 = 0;
+	u32 w7 = 0;
 	int rc = 0;
-	const u32 w3 = OPTEE_FFA_YIELDING_CALL;
 
 	/* Initialize waiter */
 	optee_cq_wait_init(&optee->call_queue, &w);
@@ -721,7 +722,7 @@ static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 		case FFA_SUCCESS:
 			break;
 		case FFA_BUSY:
-			if (w4 == OPTEE_FFA_YIELDING_CALL_RESUME) {
+			if (w3 == OPTEE_FFA_YIELDING_CALL_RESUME) {
 				pr_err("err OPTEE_FFA_YIELDING_CALL_RESUME\n");
 				rc = -EIO;
 				goto done;
@@ -739,15 +740,16 @@ static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 			goto done;
 		}
 
-		if (ret.arg4 == OPTEE_FFA_YIELDING_CALL_RETURN_NORMAL)
+		if (ret.arg4 == OPTEE_FFA_YIELDING_CALL_RETURN_DONE)
 			goto done;
 
 		might_sleep();
-		w6 = ret.arg6;
-		w7 = ret.arg7;
-		optee_handle_ffa_rpc(ctx, ret.arg4, ret.arg5, &w6, &w7);
-		w4 = OPTEE_FFA_YIELDING_CALL_RESUME;
+		w4 = ret.arg4;
 		w5 = ret.arg5;
+		w6 = ret.arg6;
+		optee_handle_ffa_rpc(ctx, &w4, &w5, &w6);
+		w3 = OPTEE_FFA_YIELDING_CALL_RESUME;
+		w7 = ret.arg7;
 	}
 done:
 
@@ -762,8 +764,11 @@ done:
 
 int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *shm)
 {
+	if (shm->offset)
+		return -EINVAL;
 	return optee_ffa_yielding_call(ctx, OPTEE_FFA_YIELDING_CALL_WITH_ARG,
-					shm->sec_world_id, 0, 1);
+				       shm->sec_world_id,
+				       shm->sec_world_id >> 32);
 }
 
 int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
@@ -801,11 +806,6 @@ int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 		return rc;
 	}
 
-	/*
-	 * TODO use OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM if
-	 * hm->num_pages > U16_MAX.
-	 */
-
 	shm->sec_world_id = global_handle;
 
 	return 0;
@@ -814,17 +814,17 @@ int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
 int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
 {
 	struct optee *optee = tee_get_drvdata(ctx->teedev);
-	u32 global_handle = shm->sec_world_id;
+	u64 global_handle = shm->sec_world_id;
 	int rc = 0;
 
 	optee_shm_rem_ffa_handle(optee, global_handle);
 	shm->sec_world_id = 0;
 
 	rc = optee_ffa_yielding_call(ctx,
-				      OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM,
-				      global_handle, 0, 0);
+				     OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM,
+				     global_handle, global_handle >> 32);
 	if (rc)
-		pr_err("OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM id 0x%x rc %d\n",
+		pr_err("OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM id 0x%llx rc %d\n",
 		       global_handle, rc);
 
 	rc = optee->ffa.ops->mem_reclaim(global_handle, 0);
