@@ -27,6 +27,7 @@ static DEFINE_MUTEX(rx_lock);
 static DEFINE_MUTEX(tx_lock);
 
 static ffa_sp_id_t vm_id;
+static bool mem_share_rw_is_64;
 
 static struct page *rx_buffer;
 static struct page *tx_buffer;
@@ -145,7 +146,7 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 			case FFA_NOT_SUPPORTED:
 				return -ENODEV;
 			default:
-				pr_warn("%s: Unknown Error code %x\n", __func__,
+				pr_warn("%s: Unknown Error code %llx\n", __func__,
 					smccc_return.arg2);
 				return -EIO;
 			}
@@ -169,10 +170,10 @@ static int ffa_share_init_frag(phys_addr_t buffer, u32 buffer_size,
 {
 
 	struct arm_smcccv1_2_return smccc_return;
-
+	u32 fid = mem_share_rw_is_64 ? FFA_MEM_SHARE_64 : FFA_MEM_SHARE_32;
 	smccc_return =
-		arm_ffa_smccc(FFA_MEM_SHARE_64, total_len, fragment_len, buffer,
-		buffer_size, 0, 0, 0);
+		arm_ffa_smccc(fid, total_len, fragment_len,
+			      buffer, buffer_size, 0, 0, 0);
 
 	while (smccc_return.arg0 != FFA_SUCCESS_32) {
 
@@ -187,7 +188,7 @@ static int ffa_share_init_frag(phys_addr_t buffer, u32 buffer_size,
 			case FFA_ABORTED:
 				return -EAGAIN;
 			default:
-				pr_warn("%s: Unknown Error code %x\n", __func__,
+				pr_warn("%s: Unknown Error code %llx\n", __func__,
 					smccc_return.arg2);
 				return -EIO;
 			}
@@ -421,7 +422,7 @@ static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 			return -EFAULT;
 		}
 
-		pr_devel("arm_ffa mem_share pa=%#lX\n", address);
+		pr_devel("arm_ffa mem_share pa=%#llX\n", address);
 
 		constituents[num_constituents].address = address;
 		constituents[num_constituents].page_count =
@@ -464,6 +465,13 @@ static int ffa_share_memory(u32 tag, enum mem_clear_t flags,
 
 		buffer_pa = page_to_phys(buffer_page);
 
+		if (!mem_share_rw_is_64 && (buffer_pa >> 32)) {
+			pr_err("%s: cannot use buffer %#llx for with 32-bit abi",
+			      __func__, buffer_pa);
+			__free_page(buffer_page);
+			return -EINVAL;
+		}
+
 		buffer_size = 1;
 	}
 
@@ -502,7 +510,7 @@ static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
 		case FFA_BUSY:
 			return -EAGAIN;
 		default:
-			pr_warn("%s: Unknown Error code %x\n", __func__,
+			pr_warn("%s: Unknown Error code %llx\n", __func__,
 				smccc_return.arg2);
 			return -EIO;
 		}
@@ -620,7 +628,6 @@ EXPORT_SYMBOL_GPL(get_ffa_ops);
 static int ffa_dt_init(struct device_node *np)
 {
 	const char *conduit;
-	const char *selected_buffer;
 
 	pr_info("FFA: obtaining conduit from DT.\n");
 
@@ -724,6 +731,14 @@ static int ffa_probe(struct platform_device *pdev)
 	if (ffa_features(FFA_MSG_SEND_DIRECT_REQ_32)) {
 		pr_err("%s: FFA implementation at EL2 does not support FFA_MSG_SEND_DIRECT_REQ_32\n",
 			__func__);
+		return -ENXIO;
+	}
+
+	if (ffa_features(FFA_MEM_SHARE_64) >= 0) {
+		mem_share_rw_is_64 = 1;
+	} else if (ffa_features(FFA_MEM_SHARE_32) < 0) {
+		pr_err("%s: FFA implementation at EL2 does not support FFA_MEM_SHARE_32 or FFA_MEM_SHARE_64\n",
+		       __func__);
 		return -ENXIO;
 	}
 

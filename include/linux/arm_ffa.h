@@ -26,6 +26,7 @@
 #define FFA_MEM_OP_RESUME_32         0x84000079
 
 #define FFA_MEM_SHARE_64             0xC4000073
+#define FFA_MEM_SHARE_32             0x84000073
 
 #define FFA_MEM_FRAG_RX_32			  0x8400007A
 #define FFA_MEM_FRAG_TX_32			  0x8400007B
