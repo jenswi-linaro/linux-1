@@ -133,8 +133,8 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 	u32 handle_low = handle & 0xffffffff;
 
 	smccc_return =
-		arm_ffa_smccc(FFA_MEM_FRAG_TX_32, handle_high,
-			handle_low, frag_len, 0, 0, 0, 0);
+		arm_ffa_smccc(FFA_MEM_FRAG_TX_32, handle_low,
+			handle_high, frag_len, 0, 0, 0, 0);
 
 	while (smccc_return.func != FFA_MEM_FRAG_RX_32) {
 
@@ -198,7 +198,7 @@ static int ffa_share_init_frag(void *buffer, u32 buffer_size,
 		}
 	}
 
-	*handle = (smccc_return.arg1 << 32) | smccc_return.arg2;
+	*handle = (smccc_return.arg3 << 32) | smccc_return.arg2;
 
 	return 0;
 }
@@ -481,9 +481,11 @@ static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
 	enum mem_clear_t flags) {
 
 	struct arm_smcccv1_2_return smccc_return;
+	u32 handle_high = (global_handle >> 32) & 0xffffffff;
+	u32 handle_low = global_handle & 0xffffffff;
 
-	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, global_handle, flags,
-			     0, 0, 0, 0, 0);
+	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, handle_low, handle_high,
+		flags, 0, 0, 0, 0);
 
 	if (smccc_return.func == FFA_ERROR_32) {
 		pr_err("%s: Error sending message %llu\n", __func__,
@@ -681,7 +683,7 @@ static int ffa_version_check()
 		return -ENODEV;
 	}
 
-	hv_version = version_return.arg1;
+	hv_version = version_return.func;
 
 	if ((hv_version>>16) == major)
 		if((hv_version & 0xffff) >= minor)

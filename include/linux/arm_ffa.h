@@ -62,7 +62,7 @@ enum ffa_mem_type {
 #define FFA_CACHEABILITY_OFFSET 2
 enum ffa_mem_cacheability {
 	FFA_NON_CACHEABLE = 0x1,
-	FFA_WRITE_BACK = 0x2,
+	FFA_WRITE_BACK = 0x3,
 };
 
 enum ffa_mem_shareability {
