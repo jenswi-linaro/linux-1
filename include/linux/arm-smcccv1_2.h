@@ -6,7 +6,7 @@
 //#if defined(ARM64)
 #if CONFIG_ARM64 
 struct arm_smcccv1_2_return {
-	u64 func;
+	u64 arg0;
 	u64 arg1;
 	u64 arg2;
 	u64 arg3;
@@ -17,7 +17,7 @@ struct arm_smcccv1_2_return {
 };
 #elif CONFIG_ARM
 struct arm_smcccv1_2_return {
-	u32 func;
+	u32 arg0;
 	u32 arg1;
 	u32 arg2;
 	u32 arg3;

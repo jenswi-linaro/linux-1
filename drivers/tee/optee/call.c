@@ -711,8 +711,8 @@ static int optee_ffa_yielding_call(struct tee_context *ctx, u32 w4, u32 w5,
 	while (true) {
 		ret = optee->ffa.ops->sync_msg_send(dst, w3, w4, w5, w6, w7);
 
-		if (ret.func) {
-			pr_err("ret.func %d\n", (int)ret.func);
+		if (ret.arg0) {
+			pr_err("ret.arg0 %d\n", (int)ret.arg0);
 			rc = -EIO;
 			goto done;
 		}

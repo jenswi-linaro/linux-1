@@ -66,7 +66,7 @@ int ffa_msg_send(ffa_sp_id_t dst_id, u32 len, u32 attributes)
 	msg_send_return = arm_ffa_smccc(FFA_MSG_SEND_32, sender_receiver,
 					 0, len, attributes, 0, 0, 0);
 
-	if (msg_send_return.func  == FFA_ERROR_32) {
+	if (msg_send_return.arg0  == FFA_ERROR_32) {
 		switch ((int)msg_send_return.arg2) {
 		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
@@ -93,33 +93,33 @@ ffa_msg_send_direct_req(ffa_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 	ret = arm_ffa_smccc(FFA_MSG_SEND_DIRECT_REQ_32, sender_receiver, 0,
 			     w3, w4, w5, w6, w7);
 
-	while (ret.func != FFA_MSG_SEND_DIRECT_RESP_32 &&
-		ret.func != FFA_SUCCESS_32)
+	while (ret.arg0 != FFA_MSG_SEND_DIRECT_RESP_32 &&
+		ret.arg0 != FFA_SUCCESS_32)
 	{
-		if (ret.func == FFA_ERROR_32) {
-			pr_err("%s: Error sending message %llu\n", __func__, ret.func);
+		if (ret.arg0 == FFA_ERROR_32) {
+			pr_err("%s: Error sending message %llu\n", __func__, ret.arg0);
 			switch ((int)ret.arg1) {
 			case FFA_INVALID_PARAMETERS:
-				ret.func = -ENXIO;
+				ret.arg0 = -ENXIO;
 				goto out;
 
 			case FFA_DENIED:
 			case FFA_NOT_SUPPORTED:
-				ret.func = -EIO;
+				ret.arg0 = -EIO;
 				goto out;
 
 			case FFA_BUSY:
-				ret.func = -EAGAIN;
+				ret.arg0 = -EAGAIN;
 				goto out;
 			}
-		} else if (ret.func == FFA_INTERRUPT_32){
+		} else if (ret.arg0 == FFA_INTERRUPT_32){
 			ret = arm_ffa_smccc(FFA_RUN_32, ret.arg1,
 				0, 0, 0, 0, 0, 0);
 		}
 
 	}
 
-	ret.func = 0;
+	ret.arg0 = 0;
 
 out:
 	return ret;
@@ -136,9 +136,9 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 		arm_ffa_smccc(FFA_MEM_FRAG_TX_32, handle_low,
 			handle_high, frag_len, 0, 0, 0, 0);
 
-	while (smccc_return.func != FFA_MEM_FRAG_RX_32) {
+	while (smccc_return.arg0 != FFA_MEM_FRAG_RX_32) {
 
-		if (smccc_return.func == FFA_ERROR_32) {
+		if (smccc_return.arg0 == FFA_ERROR_32) {
 			switch ((int)smccc_return.arg2) {
 			case FFA_INVALID_PARAMETERS:
 				return -ENXIO;
@@ -151,7 +151,7 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 			}
 		}
 
-		if (smccc_return.func == FFA_MEM_OP_PAUSE_32) {
+		if (smccc_return.arg0 == FFA_MEM_OP_PAUSE_32) {
 
 			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
 				smccc_return.arg2, 0, 0, 0, 0, 0);
@@ -172,9 +172,9 @@ static int ffa_share_init_frag(void *buffer, u32 buffer_size,
 		arm_ffa_smccc(FFA_MEM_SHARE_64, total_len, fragment_len, buffer,
 		buffer_size, 0, 0, 0);
 
-	while (smccc_return.func != FFA_SUCCESS_32) {
+	while (smccc_return.arg0 != FFA_SUCCESS_32) {
 
-		if (smccc_return.func == FFA_ERROR_32) {
+		if (smccc_return.arg0 == FFA_ERROR_32) {
 			switch ((int)smccc_return.arg2) {
 			case FFA_INVALID_PARAMETERS:
 				return -ENXIO;
@@ -191,7 +191,7 @@ static int ffa_share_init_frag(void *buffer, u32 buffer_size,
 			}
 		}
 
-		if (smccc_return.func == FFA_MEM_OP_PAUSE_32) {
+		if (smccc_return.arg0 == FFA_MEM_OP_PAUSE_32) {
 
 			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
 				smccc_return.arg2, 0, 0, 0, 0, 0);
@@ -243,7 +243,7 @@ static int ffa_rx_release(void)
 	rx_release_return = arm_ffa_smccc(FFA_RX_RELEASE_32,
 					      0, 0, 0, 0, 0, 0, 0);
 
-	if (rx_release_return.func == FFA_ERROR_32) {
+	if (rx_release_return.arg0 == FFA_ERROR_32) {
 		switch ((int)rx_release_return.arg2) {
 		case FFA_DENIED:
 			return -EAGAIN;
@@ -253,7 +253,7 @@ static int ffa_rx_release(void)
 		}
 	}
 
-	if (rx_release_return.func == FFA_RX_RELEASE_32) {
+	if (rx_release_return.arg0 == FFA_RX_RELEASE_32) {
 		/*
 		 * FFA implementation returned FFA_RX_RELEASE which signals
 		 * the PVM that other VMs need to be scheduled.
@@ -487,9 +487,9 @@ static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
 	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, handle_low, handle_high,
 		flags, 0, 0, 0, 0);
 
-	if (smccc_return.func == FFA_ERROR_32) {
+	if (smccc_return.arg0 == FFA_ERROR_32) {
 		pr_err("%s: Error sending message %llu\n", __func__,
-			smccc_return.func);
+			smccc_return.arg0);
 		switch ((int)smccc_return.arg2) {
 		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
@@ -518,7 +518,7 @@ static int ffa_features(uint32_t function_id)
 	struct arm_smcccv1_2_return features_return =
 		arm_ffa_smccc(FFA_FEATURES_32, function_id, 0, 0, 0, 0, 0, 0);
 
-	if (features_return.func == FFA_ERROR_32) {
+	if (features_return.arg0 == FFA_ERROR_32) {
 		switch ((int)features_return.arg2){
 		case FFA_NOT_SUPPORTED:
 			return -ENODEV;
@@ -537,7 +537,7 @@ static ffa_sp_id_t ffa_id_get(void)
 	struct  arm_smcccv1_2_return id_get_return =
 		arm_ffa_smccc(FFA_ID_GET_32, 0, 0, 0, 0, 0, 0, 0);
 
-	if (id_get_return.func == FFA_ERROR_32)
+	if (id_get_return.arg0 == FFA_ERROR_32)
 		panic("%s: failed to obtain vm id\n", __func__);
 	else
 		return id_get_return.arg2 & 0xffff;
@@ -558,7 +558,7 @@ static int ffa_partition_info_get(uint32_t uuid0, uint32_t uuid1,
 						   uuid0, uuid1, uuid2, uuid3,
 						   0, 0, 0);
 
-	if (partition_info_get_return.func == FFA_ERROR_32) {
+	if (partition_info_get_return.arg0 == FFA_ERROR_32) {
 		switch ((int)partition_info_get_return.arg2) {
 		case FFA_INVALID_PARAMETERS:
 			rc = -ENXIO;
@@ -647,7 +647,7 @@ static int ffa_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
 	map_return = arm_ffa_smccc(FFA_RXTX_MAP_32, tx_page,
 					 rx_page, 1, 0, 0, 0, 0);
 
-	if (map_return.func == FFA_ERROR_32) {
+	if (map_return.arg0 == FFA_ERROR_32) {
 		switch ((int)map_return.arg2) {
 		case FFA_INVALID_PARAMETERS:
 			return -ENXIO;
@@ -677,13 +677,13 @@ static int ffa_version_check()
 	version_return = arm_ffa_smccc(FFA_VERSION_32, ((u32)major<<16)|minor,
 		 0, 0, 0, 0, 0, 0);
 
-	if ((int)version_return.func == FFA_NOT_SUPPORTED)
+	if ((int)version_return.arg0 == FFA_NOT_SUPPORTED)
 	{
 		pr_err("%s: FFA ABI is not supported at higher exception levels\n", __func__);
 		return -ENODEV;
 	}
 
-	hv_version = version_return.func;
+	hv_version = version_return.arg0;
 
 	if ((hv_version>>16) == major)
 		if((hv_version & 0xffff) >= minor)
