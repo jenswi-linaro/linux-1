@@ -155,6 +155,56 @@ struct arm_smccc_res {
 	unsigned long a3;
 };
 
+#ifdef CONFIG_ARM64
+/* TODO Need to implement for ARM too */
+/**
+ * struct arm_smccc_v1_2_res - Result from SMC/HVC call
+ * @a0-a7 result values from registers 0 to 7
+ */
+struct arm_smccc_v1_2_res {
+	unsigned long a0;
+	unsigned long a1;
+	unsigned long a2;
+	unsigned long a3;
+	unsigned long a4;
+	unsigned long a5;
+	unsigned long a6;
+	unsigned long a7;
+};
+
+/**
+ * arm_smccc_v1_2_hvc() - make HVC calls
+ * @a0-a7: arguments passed in registers 0 to 7
+ * @res: result values from registers 0 to 7
+ *
+ * This function is used to make HVC calls following SMC Calling Convention
+ * v1.2 or above. The content of the supplied param are copied to registers
+ * 0 to 7 prior to the HVC instruction. The return values are updated with
+ * the content from register 0 to 7 on return from the HVC instruction.
+ */
+asmlinkage
+void arm_smccc_v1_2_hvc(unsigned long a0, unsigned long a1, unsigned long a2,
+			unsigned long a3, unsigned long a4, unsigned long a5,
+			unsigned long a6, unsigned long a7,
+			struct arm_smccc_v1_2_res  *res);
+
+/**
+ * arm_smccc_v1_2_smc() - make SMC calls
+ * @a0-a7: arguments passed in registers 0 to 7
+ * @res: result values from registers 0 to 7
+ *
+ * This function is used to make SMC calls following SMC Calling Convention
+ * v1.2 or above. The content of the supplied param are copied to registers
+ * 0 to 7 prior to the SMC instruction. The return values are updated with
+ * the content from register 0 to 7 on return from the SMC instruction.
+ */
+asmlinkage
+void arm_smccc_v1_2_smc(unsigned long a0, unsigned long a1, unsigned long a2,
+			unsigned long a3, unsigned long a4, unsigned long a5,
+			unsigned long a6, unsigned long a7,
+			struct arm_smccc_v1_2_res  *res);
+#endif
+
 /**
  * struct arm_smccc_quirk - Contains quirk information
  * @id: quirk identification
