@@ -163,7 +163,7 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 	return 0;
 }
 
-static int ffa_share_init_frag(void *buffer, u32 buffer_size,
+static int ffa_share_init_frag(phys_addr_t buffer, u32 buffer_size,
 	u32 fragment_len, u32 total_len, u64 *handle)
 {
 
@@ -297,7 +297,7 @@ static inline struct ffa_memory_region_attribute ffa_set_region_device(
 	return attr;
 }
 
-static inline int ffa_transmit_fragment(u32 *tx_offset, void *buffer,
+static inline int ffa_transmit_fragment(u32 *tx_offset, phys_addr_t buffer,
 	u32 buffer_size, u32 frag_len, u32 total_len, u64 *handle)
 {
 	int rc;
@@ -321,13 +321,12 @@ static inline int ffa_transmit_fragment(u32 *tx_offset, void *buffer,
 static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 	struct ffa_mem_region_attributes *attrs,
 	u32 num_attrs, struct scatterlist *sg, u32 nents,
-	ffa_mem_handle_t *handle, void *buffer, uint32_t buffer_size)
+	ffa_mem_handle_t *handle, phys_addr_t buffer, uint32_t buffer_size)
 {
 	struct ffa_mem_region *mem_region;
 	u32 index;
 	u32 num_constituents;
 	struct ffa_mem_region_constituent *constituents;
-	struct arm_smcccv1_2_return smccc_return;
 	u32 total_len;
 	u32 fragment_len = sizeof(struct ffa_mem_region);
 	u32 max_fragment_size;
@@ -445,7 +444,7 @@ static int ffa_share_memory(u32 tag, enum mem_clear_t flags,
 	ffa_mem_handle_t *global_handle, bool use_tx)
 {
 	u32 buffer_size = 0;
-	void *buffer_pa = NULL;
+	phys_addr_t buffer_pa = 0;
 	int ret;
 	struct page *buffer_page = NULL;
 
