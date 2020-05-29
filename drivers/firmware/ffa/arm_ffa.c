@@ -353,7 +353,7 @@ static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 	mem_region->tag = tag;
 	mem_region->sender_id = vm_id;
 	mem_region->region_attr = ffa_set_region_normal(FFA_WRITE_BACK,
-		FFA_OUTER_SHAREABLE);
+		FFA_INNER_SHAREABLE);
 	composite = ffa_get_composite(mem_region, num_attrs);
 	composite->total_page_count = ffa_get_num_pages_sg(sg);
 
