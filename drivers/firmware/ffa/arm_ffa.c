@@ -94,10 +94,10 @@ ffa_msg_send_direct_req(ffa_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 			     w3, w4, w5, w6, w7);
 
 	while (ret.arg0 != FFA_MSG_SEND_DIRECT_RESP_32 &&
-		ret.arg0 != FFA_SUCCESS_32)
-	{
+		ret.arg0 != FFA_SUCCESS_32) {
 		if (ret.arg0 == FFA_ERROR_32) {
-			pr_err("%s: Error sending message %llu\n", __func__, ret.arg0);
+			pr_err("%s: Error sending message %llu\n", __func__,
+				ret.arg0);
 			switch ((int)ret.arg1) {
 			case FFA_INVALID_PARAMETERS:
 				ret.arg0 = -ENXIO;
@@ -112,7 +112,7 @@ ffa_msg_send_direct_req(ffa_sp_id_t dst_id, u64 w3, u64 w4, u64 w5,
 				ret.arg0 = -EAGAIN;
 				goto out;
 			}
-		} else if (ret.arg0 == FFA_INTERRUPT_32){
+		} else if (ret.arg0 == FFA_INTERRUPT_32) {
 			ret = arm_ffa_smccc(FFA_RUN_32, ret.arg1,
 				0, 0, 0, 0, 0, 0);
 		}
@@ -153,8 +153,9 @@ static int ffa_share_next_frag(u64 handle, u32 frag_len, u32 *tx_offset)
 
 		if (smccc_return.arg0 == FFA_MEM_OP_PAUSE_32) {
 
-			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
-				smccc_return.arg2, 0, 0, 0, 0, 0);
+			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32,
+				smccc_return.arg1, smccc_return.arg2, 0, 0, 0,
+				0, 0);
 		}
 	}
 
@@ -168,6 +169,7 @@ static int ffa_share_init_frag(phys_addr_t buffer, u32 buffer_size,
 {
 
 	struct arm_smcccv1_2_return smccc_return;
+
 	smccc_return =
 		arm_ffa_smccc(FFA_MEM_SHARE_64, total_len, fragment_len, buffer,
 		buffer_size, 0, 0, 0);
@@ -193,8 +195,9 @@ static int ffa_share_init_frag(phys_addr_t buffer, u32 buffer_size,
 
 		if (smccc_return.arg0 == FFA_MEM_OP_PAUSE_32) {
 
-			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32, smccc_return.arg1,
-				smccc_return.arg2, 0, 0, 0, 0, 0);
+			smccc_return = arm_ffa_smccc(FFA_MEM_OP_RESUME_32,
+				smccc_return.arg1, smccc_return.arg2, 0, 0, 0,
+				0, 0);
 		}
 	}
 
@@ -267,6 +270,7 @@ static int ffa_rx_release(void)
 static uint32_t ffa_get_num_pages_sg(struct scatterlist *sg)
 {
 	uint32_t num_pages = 0;
+
 	do {
 		num_pages += sg->length/PAGE_SIZE;
 	} while ((sg = sg_next(sg)));
@@ -302,7 +306,7 @@ static inline int ffa_transmit_fragment(u32 *tx_offset, phys_addr_t buffer,
 {
 	int rc;
 
-	if(*tx_offset==0) {
+	if (*tx_offset == 0) {
 		rc = ffa_share_init_frag(buffer, buffer_size,
 			frag_len, total_len, handle);
 
@@ -334,7 +338,7 @@ static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 	u32 tx_offset = 0;
 	struct ffa_composite_memory_region *composite = NULL;
 
-	if(buffer) {
+	if (buffer) {
 
 		BUG_ON(!buffer_size);
 		max_fragment_size = buffer_size * FFA_BASE_GRANULE_SIZE;
@@ -390,17 +394,18 @@ static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 		if (fragment_len == max_fragment_size) {
 
 			/* Transmit fragment. */
-			rc = ffa_transmit_fragment(&tx_offset, buffer, buffer_size,
-				fragment_len, total_len, handle);
+			rc = ffa_transmit_fragment(&tx_offset, buffer,
+				buffer_size, fragment_len, total_len, handle);
 
 			if (rc < 0)
 				return -ENXIO;
 
 
-			constituents = (struct ffa_mem_region_constituent *)mem_region;
+			constituents =
+				(struct ffa_mem_region_constituent *)mem_region;
+
 			num_constituents = 0;
 			fragment_len = 0;
-
 		}
 
 		address = sg_phys(sg);
@@ -410,22 +415,22 @@ static int _ffa_share_memory(u32 tag, enum mem_clear_t flags,
 		 * region.
 		 */
 		if (((void *) &constituents[num_constituents])
-			- (void *)mem_region > max_fragment_size)
-		{
+			- (void *)mem_region > max_fragment_size) {
 			pr_err("%s: memory region fragment greater that the Tx buffer",
-				 __func__);
+				__func__);
 			return -EFAULT;
 		}
 
 		pr_devel("arm_ffa mem_share pa=%#lX\n", address);
 
 		constituents[num_constituents].address = address;
-		constituents[num_constituents].page_count = sg->length/PAGE_SIZE;
+		constituents[num_constituents].page_count =
+			sg->length/PAGE_SIZE;
 		num_constituents++;
 		fragment_len += sizeof(struct ffa_mem_region_constituent);
 
 
-	} while((sg = sg_next(sg)));
+	} while ((sg = sg_next(sg)));
 
 	rc = ffa_transmit_fragment(&tx_offset, buffer, buffer_size,
 		fragment_len, total_len, handle);
@@ -448,12 +453,10 @@ static int ffa_share_memory(u32 tag, enum mem_clear_t flags,
 	int ret;
 	struct page *buffer_page = NULL;
 
-	if (!use_tx)
-	{
+	if (!use_tx) {
 		/* Allocate buffer for this mem_share operation. */
 		buffer_page = alloc_page(GFP_KERNEL);
-		if (IS_ERR_OR_NULL(buffer_page))
-		{
+		if (IS_ERR_OR_NULL(buffer_page)) {
 			/* print error. Return as tx lock is not held. */
 			pr_err("%s: unable to allocate buffer", __func__);
 			return -ENOMEM;
@@ -477,14 +480,15 @@ static int ffa_share_memory(u32 tag, enum mem_clear_t flags,
 }
 
 static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
-	enum mem_clear_t flags) {
+	enum mem_clear_t flags)
+{
 
 	struct arm_smcccv1_2_return smccc_return;
 	u32 handle_high = (global_handle >> 32) & 0xffffffff;
 	u32 handle_low = global_handle & 0xffffffff;
 
-	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, handle_low, handle_high,
-		flags, 0, 0, 0, 0);
+	smccc_return = arm_ffa_smccc(FFA_MEM_RECLAIM_32, handle_low,
+		handle_high, flags, 0, 0, 0, 0);
 
 	if (smccc_return.arg0 == FFA_ERROR_32) {
 		pr_err("%s: Error sending message %llu\n", __func__,
@@ -510,7 +514,7 @@ static int ffa_memory_reclaim(ffa_mem_handle_t global_handle,
 /*
  * Returns a negative value if function not supported. Otherwise returns w2,
  * supplying optional feature parameter else 0.
-*/
+ */
 
 static int ffa_features(uint32_t function_id)
 {
@@ -518,15 +522,14 @@ static int ffa_features(uint32_t function_id)
 		arm_ffa_smccc(FFA_FEATURES_32, function_id, 0, 0, 0, 0, 0, 0);
 
 	if (features_return.arg0 == FFA_ERROR_32) {
-		switch ((int)features_return.arg2){
+		switch ((int)features_return.arg2) {
 		case FFA_NOT_SUPPORTED:
 			return -ENODEV;
 		default:
 			panic("%s: Unhandled return code (%lld)\n", __func__,
 			      features_return.arg2);
 		}
-	}
-	else {
+	} else {
 		return features_return.arg2;
 	}
 }
@@ -670,7 +673,7 @@ static int ffa_rxtx_map(uintptr_t tx_page, uintptr_t rx_page)
 	return 0;
 }
 
-static int ffa_version_check()
+static int ffa_version_check(void)
 {
 	struct arm_smcccv1_2_return version_return;
 	u16 major = 1;
@@ -680,19 +683,20 @@ static int ffa_version_check()
 	version_return = arm_ffa_smccc(FFA_VERSION_32, ((u32)major<<16)|minor,
 		 0, 0, 0, 0, 0, 0);
 
-	if ((int)version_return.arg0 == FFA_NOT_SUPPORTED)
-	{
-		pr_err("%s: FFA ABI is not supported at higher exception levels\n", __func__);
+	if ((int)version_return.arg0 == FFA_NOT_SUPPORTED) {
+		pr_err("%s: FFA ABI is not supported at higher exception levels\n",
+			__func__);
 		return -ENODEV;
 	}
 
 	hv_version = version_return.arg0;
 
 	if ((hv_version>>16) == major)
-		if((hv_version & 0xffff) >= minor)
+		if ((hv_version & 0xffff) >= minor)
 			return 0;
 
-	pr_err("%s: incompatible FFA ABI at higher exception level (%x)\n", __func__, hv_version);
+	pr_err("%s: incompatible FFA ABI at higher exception level (%x)\n",
+		__func__, hv_version);
 	return -ENODEV;
 }
 
@@ -718,8 +722,8 @@ static int ffa_probe(struct platform_device *pdev)
 	}
 
 	if (ffa_features(FFA_MSG_SEND_DIRECT_REQ_32)) {
-		pr_err("%s: FFA implementation at EL2 does not support"
-			" FFA_MSG_SEND_DIRECT_REQ_32\n", __func__);
+		pr_err("%s: FFA implementation at EL2 does not support FFA_MSG_SEND_DIRECT_REQ_32\n",
+			__func__);
 		return -ENXIO;
 	}
 
