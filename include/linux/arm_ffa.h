@@ -134,7 +134,8 @@ ffa_get_composite(struct ffa_mem_region *mem_region, u32 num_endpoints)
 {
 	struct ffa_composite_memory_region *composite;
 
-	composite = (struct ffa_composite_memory_region *)(&mem_region->endpoints[num_endpoints]);
+	composite = (struct ffa_composite_memory_region *)
+		(&mem_region->endpoints[num_endpoints]);
 	return composite;
 }
 
@@ -179,9 +180,9 @@ struct ffa_ops {
 	 *  - sg: scatter list holding the pages to be shared.
 	 *  - global_handle: A system-wide unique handle referring to the shared
 	 *     set of physical pages being shared.
-	 *  - use_tx: select if memorry region description is transmitted in tx or
-	 *     in a dynamically allocated buffer. When using the tx buffer a global
-	 *     lock on the tx buffer will be held.
+	 *  - use_tx: select if memorry region description is transmitted in tx
+	 *     or in a dynamically allocated buffer. When using the tx buffer a
+	 *     global lock on the tx buffer will be held.
 	 *
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
@@ -203,7 +204,8 @@ struct ffa_ops {
 	 * Return: 0 in case of success, otherwise a negative value
 	 * (error code).
 	 */
-	int (*mem_reclaim)(ffa_mem_handle_t global_handle, enum mem_clear_t flags);
+	int (*mem_reclaim)(ffa_mem_handle_t global_handle,
+		enum mem_clear_t flags);
 	/**
 	 * Returns information on a sub-set of partitions within a system
 	 * identified by a UUID.
@@ -221,7 +223,7 @@ struct ffa_ops {
 	 *	   otherwise a negative value (error code).
 	 */
 	int (*partition_info_get)(u32 uuid0, u32 uuid1, u32 uuid2, u32 uuid3,
-				   struct ffa_partition_info**);
+				   struct ffa_partition_info **buffer);
 };
 
 #if IS_REACHABLE(CONFIG_ARM_FFA_TRANSPORT)
