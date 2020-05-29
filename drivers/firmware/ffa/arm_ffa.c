@@ -532,15 +532,19 @@ static int ffa_features(uint32_t function_id)
 	}
 }
 
-static ffa_sp_id_t ffa_id_get(void)
+static ffa_sp_id_t ffa_id_get(ffa_sp_id_t *vm_id_p)
 {
 	struct  arm_smcccv1_2_return id_get_return =
 		arm_ffa_smccc(FFA_ID_GET_32, 0, 0, 0, 0, 0, 0, 0);
 
-	if (id_get_return.arg0 == FFA_ERROR_32)
-		panic("%s: failed to obtain vm id\n", __func__);
-	else
-		return id_get_return.arg2 & 0xffff;
+	if (id_get_return.arg0 == FFA_ERROR_32) {
+		pr_warn("%s: failed to obtain vm id\n", __func__);
+		return -EIO;
+	}
+
+	*vm_id_p = id_get_return.arg2 & 0xffff;
+
+	return 0;
 }
 
 static int ffa_partition_info_get(uint32_t uuid0, uint32_t uuid1,
@@ -588,9 +592,7 @@ static int ffa_partition_info_get(uint32_t uuid0, uint32_t uuid1,
 	}
 	memcpy(*buffer, info, sizeof(struct ffa_partition_info) * count);
 
-	rc = ffa_rx_release();
-	if (rc)
-		panic("%s: Unhandled return code (%lld)\n", __func__, rc);
+	ffa_rx_release();
 
 	rc = count;
 err:
@@ -629,8 +631,10 @@ static int ffa_dt_init(struct device_node *np)
 		arm_ffa_smccc = arm_ffa_smc;
 	else if (!strcmp("hvc", conduit))
 		arm_ffa_smccc = arm_ffa_hvc;
-	else
-		panic("%s: unrecognized FFA conduit\n", __func__);
+	else {
+		pr_warn("%s: unrecognized FFA conduit\n", __func__);
+		return -EIO;
+	}
 
 	return 0;
 }
@@ -697,14 +701,22 @@ static int ffa_probe(struct platform_device *pdev)
 {
 	int ret;
 
-	ffa_dt_init(pdev->dev.of_node);
+	ret = ffa_dt_init(pdev->dev.of_node);
+	if (ret) {
+		pr_warn("%s: FFA driver initialization failed\n", __func__);
+		return ret;
+	}
 
 	ret = ffa_version_check();
 	if (ret)
 		return ret;
 
 	/* Initialize VM ID. */
-	vm_id = ffa_id_get();
+	ret = ffa_id_get(&vm_id);
+	if (ret) {
+		pr_warn("%s: failed to obtain own FFA endpoint ID\n", __func__);
+		return ret;
+	}
 
 	if (ffa_features(FFA_MSG_SEND_DIRECT_REQ_32)) {
 		pr_err("%s: FFA implementation at EL2 does not support"
