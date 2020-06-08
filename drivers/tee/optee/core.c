@@ -910,8 +910,8 @@ static bool optee_ffa_api_is_compatbile(struct ffa_ops *ffa_ops, u32 dst)
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_GET_API_VERSION,
 				     0, 0, 0, 0);
-	if (ret.func != FFA_SUCCESS) {
-		pr_err("Unexpected return fid 0x%llx", ret.func);
+	if (ret.arg0 != FFA_SUCCESS) {
+		pr_err("Unexpected return fid 0x%llx", ret.arg0);
 		return false;
 	}
 	if (ret.arg3 != OPTEE_FFA_VERSION_MAJOR ||
@@ -923,8 +923,8 @@ static bool optee_ffa_api_is_compatbile(struct ffa_ops *ffa_ops, u32 dst)
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_GET_OS_VERSION,
 				     0, 0, 0, 0);
-	if (ret.func) {
-		pr_err("Unexpected error 0x%llx", ret.func);
+	if (ret.arg0) {
+		pr_err("Unexpected error 0x%llx", ret.arg0);
 		return false;
 	}
 	if (ret.arg5)
@@ -943,8 +943,8 @@ static bool optee_ffa_exchange_caps(struct ffa_ops *ffa_ops, u32 dst,
 
 	ret = ffa_ops->sync_msg_send(dst, OPTEE_FFA_EXCHANGE_CAPABILITIES,
 				     0, 0, 0, 0);
-	if (ret.func) {
-		pr_err("Unexpected error 0x%llx", ret.func);
+	if (ret.arg0) {
+		pr_err("Unexpected error 0x%llx", ret.arg0);
 		return false;
 	}
 
