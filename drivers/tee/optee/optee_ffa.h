@@ -28,8 +28,8 @@
  * w3-w7: Implementation defined, free to be used below
  */
 
-#define OPTEE_FFA_VERSION_MAJOR	0
-#define OPTEE_FFA_VERSION_MINOR	9
+#define OPTEE_FFA_VERSION_MAJOR	1
+#define OPTEE_FFA_VERSION_MINOR	0
 
 #define OPTEE_FFA_BLOCKING_CALL(id)	(id)
 #define OPTEE_FFA_YIELDING_CALL_BIT	31
