@@ -824,7 +824,7 @@ int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
 				     OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM,
 				     global_handle, global_handle >> 32);
 	if (rc)
-		pr_err("OPTEE_SPCI_YIELDING_CALL_UNREGISTER_SHM id 0x%llx rc %d\n",
+		pr_err("OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM id 0x%llx rc %d\n",
 		       global_handle, rc);
 
 	rc = optee->ffa.ops->mem_reclaim(global_handle, 0);
