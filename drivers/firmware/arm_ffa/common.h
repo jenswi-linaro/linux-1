@@ -18,9 +18,13 @@ typedef ffa_res_t
 int __init arm_ffa_bus_init(void);
 void __exit arm_ffa_bus_exit(void);
 
+#ifdef CONFIG_ARM_FFA_SMCCC
+int __init ffa_transport_init(ffa_fn **invoke_ffa_fn);
+#else
 static inline int __init ffa_transport_init(ffa_fn **invoke_ffa_fn)
 {
 	return -EOPNOTSUPP;
 }
+#endif
 
 #endif /* _FFA_COMMON_H */
