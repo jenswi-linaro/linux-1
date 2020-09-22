@@ -46,10 +46,10 @@
 struct scatterlist;
 
 enum ffa_mem_permission {
-	FFA_MEM_R   = 0x5,
-	FFA_MEM_RW  = 0x6,
-	FFA_MEM_XR  = 0x9,
-	FFA_MEM_XRW = 0xA,
+	FFA_MEM_R   = 0x1,
+	FFA_MEM_RW  = 0x2,
+	FFA_MEM_XN  = 0x4,
+	FFA_MEM_X   = 0x8,
 };
 
 #define FFA_MEMTYPE_OFFSET 4
