@@ -6,6 +6,7 @@
 #ifndef _FFA_COMMON_H
 #define _FFA_COMMON_H
 
+#include <linux/arm_ffa.h>
 #include <linux/arm-smccc.h>
 #include <linux/err.h>
 
@@ -17,6 +18,7 @@ typedef ffa_res_t
 
 int __init arm_ffa_bus_init(void);
 void __exit arm_ffa_bus_exit(void);
+bool ffa_device_is_valid(struct ffa_device *ffa_dev);
 
 #ifdef CONFIG_ARM_FFA_SMCCC
 int __init ffa_transport_init(ffa_fn **invoke_ffa_fn);
