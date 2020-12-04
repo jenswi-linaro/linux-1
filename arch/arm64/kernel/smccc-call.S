@@ -43,3 +43,25 @@ SYM_FUNC_START(__arm_smccc_hvc)
 	SMCCC	hvc
 SYM_FUNC_END(__arm_smccc_hvc)
 EXPORT_SYMBOL(__arm_smccc_hvc)
+
+	.macro SMCCC_v1_2 instr
+	.cfi_startproc
+	\instr #0
+	ldr x8, [sp]
+	stp x0, x1, [x8, #ARM_SMCCC_V1_2_RES_X0_OFFS]
+	stp x2, x3, [x8, #ARM_SMCCC_V1_2_RES_X2_OFFS]
+	stp x4, x5, [x8, #ARM_SMCCC_V1_2_RES_X4_OFFS]
+	stp x6, x7, [x8, #ARM_SMCCC_V1_2_RES_X6_OFFS]
+	ret
+	.cfi_endproc
+.endm
+
+SYM_FUNC_START(arm_smccc_v1_2_hvc)
+	SMCCC_v1_2 hvc
+SYM_FUNC_END(arm_smccc_v1_2_hvc)
+EXPORT_SYMBOL(arm_smccc_v1_2_hvc)
+
+SYM_FUNC_START(arm_smccc_v1_2_smc)
+	SMCCC_v1_2 smc
+SYM_FUNC_END(arm_smccc_v1_2_smc)
+EXPORT_SYMBOL(arm_smccc_v1_2_smc)
