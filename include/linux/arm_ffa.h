@@ -6,7 +6,6 @@
 #ifndef _LINUX_ARM_FFA_H
 #define _LINUX_ARM_FFA_H
 
-#include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/module.h>
 #include <linux/types.h>
@@ -47,6 +46,7 @@ void ffa_device_unregister(struct ffa_device *ffa_dev);
 int ffa_driver_register(struct ffa_driver *driver, struct module *owner,
 			const char *mod_name);
 void ffa_driver_unregister(struct ffa_driver *driver);
+const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev);
 
 #else
 static inline
@@ -66,6 +66,10 @@ ffa_driver_register(struct ffa_driver *driver, struct module *owner,
 
 static inline void ffa_driver_unregister(struct ffa_driver *driver) {}
 
+const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
+{
+	return NULL;
+}
 #endif /* CONFIG_ARM_FFA_TRANSPORT */
 
 #define ffa_register(driver) \
@@ -83,5 +87,35 @@ static inline void ffa_driver_unregister(struct ffa_driver *driver) {}
  */
 #define module_ffa_driver(__ffa_driver)	\
 	module_driver(__ffa_driver, ffa_register, ffa_unregister)
+
+/* FFA transport related */
+struct ffa_partition_info {
+	u16 id;
+	u16 exec_ctxt;
+/* partition supports receipt of direct requests */
+#define FFA_PARTITION_DIRECT_RECV	BIT(0)
+/* partition can send direct requests. */
+#define FFA_PARTITION_DIRECT_SEND	BIT(1)
+/* partition can send and receive indirect messages. */
+#define FFA_PARTITION_INDIRECT_MSG	BIT(2)
+	u32 properties;
+};
+
+struct ffa_send_direct_data {
+	unsigned long data0;
+	unsigned long data1;
+	unsigned long data2;
+	unsigned long data3;
+	unsigned long data4;
+};
+
+struct ffa_dev_ops {
+	u32 (*api_version_get)(void);
+	u16 (*partition_id_get)(struct ffa_device *dev);
+	int (*partition_info_get)(const char *uuid_str,
+				  struct ffa_partition_info *buffer);
+	int (*sync_send_receive)(struct ffa_device *dev, u16 ep,
+				 struct ffa_send_direct_data *data);
+};
 
 #endif /* _LINUX_ARM_FFA_H */
