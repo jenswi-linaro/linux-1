@@ -167,21 +167,13 @@ bool ffa_device_is_valid(struct ffa_device *ffa_dev)
 	return valid;
 }
 
-static int __init arm_ffa_bus_init(void)
+int __init arm_ffa_bus_init(void)
 {
 	return bus_register(&ffa_bus_type);
 }
-module_init(arm_ffa_bus_init);
 
-static void __exit arm_ffa_bus_exit(void)
+void __exit arm_ffa_bus_exit(void)
 {
 	ffa_devices_unregister();
 	bus_unregister(&ffa_bus_type);
 }
-
-module_exit(arm_ffa_bus_exit);
-
-MODULE_ALIAS("arm-ffa-bus");
-MODULE_AUTHOR("Sudeep Holla <sudeep.holla@arm.com>");
-MODULE_DESCRIPTION("Arm FF-A bus driver");
-MODULE_LICENSE("GPL v2");
