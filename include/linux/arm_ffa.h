@@ -108,6 +108,8 @@ struct ffa_send_direct_data {
 	unsigned long data3;
 	unsigned long data4;
 };
+// A comment describing which register index these maps to would be
+// helpful.
 
 struct ffa_mem_region_addr_range {
 	/* The base IPA of the constituent memory region, aligned to 4 kiB */
@@ -253,6 +255,7 @@ struct ffa_mem_ops_args {
 	struct ffa_mem_region_attributes *attrs;
 	u32 nattrs;
 	struct scatterlist *sg;
+// Why a pointer instead of value
 	u64 *g_handle;
 };
 
@@ -263,6 +266,10 @@ struct ffa_dev_ops {
 				  struct ffa_partition_info *buffer);
 	int (*sync_send_receive)(struct ffa_device *dev, u16 ep,
 				 struct ffa_send_direct_data *data);
+// @ep can be read directly from dev->vm_id
+// We may need a way to indicate if we're to use the 32bit or 64bit
+// calling convention. OP-TEE depends on being able to use 32bit calls here
+
 	int (*memory_reclaim)(u64 g_handle, u32 flags);
 	int (*memory_share)(struct ffa_mem_ops_args *args);
 };

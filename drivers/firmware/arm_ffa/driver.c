@@ -33,6 +33,7 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uuid.h>
+#include <asm/unaligned.h>
 
 #include "common.h"
 
@@ -261,8 +262,15 @@ static int ffa_partition_probe(const char *uuid_str,
 	}
 
 	export_uuid((u8 *)uuid0_4, &uuid);
-	count = __ffa_partition_info_get(uuid0_4[0], uuid0_4[1], uuid0_4[2],
-					 uuid0_4[3], &buffer);
+/* Wrong byte order?
+ * Acccording to section 5.3 of the SMCCC, UUIDs are returned as a single
+ * 128-bit value using the SMC32 calling convention. This value is mapped to
+ * argument registers x0-x3 on AArch64 (resp. r0-r3 on AArch32). x0 for example
+ * shall hold bytes 0 to 3, with byte 0 in the low-order bits.
+ */
+
+	count = __ffa_partition_info_get(get_unaligned_be32(&uuid0_4[0]), get_unaligned_be32(&uuid0_4[1]), get_unaligned_be32(&uuid0_4[2]),
+					 get_unaligned_be32(&uuid0_4[3]), &buffer);
 
 	return count;
 }
@@ -287,8 +295,13 @@ static int ffa_msg_send_direct_req(u16 src_id, u16 dst_id,
 {
 	u32 src_dst_ids = PACK_TARGET_INFO(src_id, dst_id);
 	ffa_res_t ret;
+	u32 req_id = FFA_MSG_SEND_DIRECT_REQ;
+	u32 resp_id = FFA_MSG_SEND_DIRECT_RESP;
 
-	ret = invoke_ffa_fn(FFA_FN_NATIVE(MSG_SEND_DIRECT_REQ), src_dst_ids, 0,
+// What if the destination SP expects a 32-bit call? OP-TEE does since it
+// may be compiled for AArch32 so we're using the 32-bit calling convention
+// allways
+	ret = invoke_ffa_fn(req_id, src_dst_ids, 0,
 			    data->data0, data->data1, data->data2,
 			    data->data3, data->data4);
 
@@ -297,7 +310,7 @@ static int ffa_msg_send_direct_req(u16 src_id, u16 dst_id,
 	if (ret.a0 == FFA_ERROR)
 		return ffa_to_linux_errno((int)ret.a2);
 
-	if (ret.a0 == FFA_FN_NATIVE(MSG_SEND_DIRECT_RESP)) {
+	if (ret.a0 == resp_id) {
 		data->data0 = ret.a3;
 		data->data1 = ret.a4;
 		data->data2 = ret.a5;
@@ -324,8 +337,10 @@ static int ffa_mem_first_frag(u32 func_id, phys_addr_t buf, u32 buf_sz,
 	if (ret.a0 != FFA_SUCCESS)
 		return -EOPNOTSUPP;
 
+// ret.a2 are the lower 32 and ret.a3 the higher 32 according to 5.10.2
+// Memory region handle
 	if (handle)
-		*handle = PACK_HANDLE(ret.a3, ret.a2);
+		*handle = PACK_HANDLE(ret.a2, ret.a3);
 
 	return frag_len;
 }
@@ -383,7 +398,7 @@ ffa_setup_and_transmit(u32 func_id, void *buffer, u32 max_fragsize,
 	struct ffa_mem_region_attributes *ep_mem_access;
 	struct ffa_mem_region *mem_region = buffer;
 	u32 idx, frag_len, length, num_entries = sg_nents(args->sg);
-	u32 buf_sz = max_fragsize / FFA_PAGE_SIZE;
+	u32 buf_sz = 0;
 
 	mem_region->tag = args->tag;
 	mem_region->flags = args->flags;
@@ -408,8 +423,11 @@ ffa_setup_and_transmit(u32 func_id, void *buffer, u32 max_fragsize,
 	if (frag_len > max_fragsize)
 		return -ENXIO;
 
-	if (!args->use_txbuf)
+	if (!args->use_txbuf) {
 		addr = virt_to_phys(buffer);
+// buf_sz must be zero (see 11.3 FFA_MEM_SHARE) if we're using the tx buffer
+		buf_sz = max_fragsize / FFA_PAGE_SIZE;
+	}
 
 	constituents = buffer + frag_len;
 	idx = 0;
@@ -527,6 +545,8 @@ const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
 }
 EXPORT_SYMBOL_GPL(ffa_dev_ops_get);
 
+// This function is only used internally and the return value is ignored.
+// Maybe make it static void instead?
 int ffa_setup_partitions(struct device_node *np)
 {
 	int ret;
@@ -537,18 +557,17 @@ int ffa_setup_partitions(struct device_node *np)
 	uuid_t uuid = UUID_INIT(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
 
 	for_each_child_of_node(np, child) {
+// of_node_put() should only be called on child in case we're leaving the
+// loop early. for_each_child_of_node() takes care of the other case.
 		if (!of_device_is_compatible(child, "arm,ffa-1.0-partition")) {
-			of_node_put(child);
 			continue;
 		}
 
 		if (of_property_read_string(child, "uuid", &p_uuid)) {
 			pr_err("%s: failed to parse \"uuid\" property\n", pfx);
-			of_node_put(child);
 			continue;
 		}
 
-		of_node_put(child);
 
 		if (uuid_parse(p_uuid, &uuid)) {
 			pr_err("%s: invalid \"uuid\" property (%s)\n",
@@ -558,9 +577,13 @@ int ffa_setup_partitions(struct device_node *np)
 
 		ret = ffa_partition_probe(p_uuid, &pbuf);
 		if (ret != 1) {
+			//of_node_put(child);
 			pr_err("%s: %s partition info probe failed\n",
 			       pfx, p_uuid);
-			return -EINVAL;
+// Perhaps we should continue and only return an error if every partition
+// has failed.
+			//return -EINVAL;
+			continue;
 		}
 
 		ffa_dev = ffa_device_register(p_uuid, pbuf.id);
