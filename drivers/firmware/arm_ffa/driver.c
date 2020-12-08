@@ -580,40 +580,49 @@ static int __init ffa_init(void)
 	int ret;
 	struct device_node *np;
 
+
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	ret = arm_ffa_bus_init();
 	if (ret)
 		return ret;
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	ret = ffa_transport_init(&invoke_ffa_fn);
 	if (ret)
 		return ret;
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	drv_info = kzalloc(sizeof(*drv_info), GFP_KERNEL);
 	if (!drv_info)
 		return -ENOMEM;
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	ret = ffa_version_check(&drv_info->version);
 	if (ret)
 		goto free_drv_info;
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	if (ffa_id_get(&drv_info->vm_id)) {
 		pr_err("failed to obtain VM id for self\n");
 		ret = -ENODEV;
 		goto free_drv_info;
 	}
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	drv_info->rx_buffer = alloc_pages_exact(RXTX_BUFFER_SIZE, GFP_KERNEL);
 	if (!drv_info->rx_buffer) {
 		ret = -ENOMEM;
 		goto free_pages;
 	}
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	drv_info->tx_buffer = alloc_pages_exact(RXTX_BUFFER_SIZE, GFP_KERNEL);
 	if (!drv_info->tx_buffer) {
 		ret = -ENOMEM;
 		goto free_pages;
 	}
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	ret = ffa_rxtx_map(virt_to_phys(drv_info->tx_buffer),
 			   virt_to_phys(drv_info->rx_buffer),
 			   RXTX_BUFFER_SIZE / FFA_PAGE_SIZE);
@@ -622,6 +631,7 @@ static int __init ffa_init(void)
 		goto free_pages;
 	}
 
+	pr_warn("%s: %d hej2\n", __func__, __LINE__);
 	mutex_init(&drv_info->rx_lock);
 	mutex_init(&drv_info->tx_lock);
 
@@ -630,6 +640,7 @@ static int __init ffa_init(void)
 	if (!np)
 		return 0;
 
+	pr_warn("%s: %d hej\n", __func__, __LINE__);
 	ffa_setup_partitions(np);
 	of_node_put(np);
 
