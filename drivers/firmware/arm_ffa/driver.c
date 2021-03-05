@@ -145,6 +145,46 @@
 /* Store Schedule Receiver IRQ ID */
 static u32 ffa_sched_recv_int_id;
 
+#define SECURE_WORLD_MASK BIT(15)
+
+/* Store callbacks for notifications */
+#define MAX_PARTITIONS 15
+
+#define INVALID_VM_ID 0x7FFF
+
+/* Allocate list of VM structs to store information pertaining to a given partition.
+ * TODO: Allocate dynamically based on Partition Info Get instead of statically.
+ */
+struct vm vms[MAX_PARTITIONS];
+
+/* Helper functions for VM struct related information. */
+static struct vm *get_vm_struct(ffa_partition_id_t partition_id) {
+	int i;
+	for (i = 0; i < MAX_PARTITIONS; i++) {
+		/* Found matching VM. */
+		if (vms[i].vm_id == partition_id) {
+			return &vms[i];
+		}
+	}
+	return NULL;
+}
+
+static int allocate_vm_struct(ffa_partition_id_t partition_id) {
+	int i;
+	/* Check if an existing VM struct exists. */
+	if (get_vm_struct(partition_id))
+		return -EACCES;
+
+	/* If not, find the first avaliable slot.*/
+	for (i = 0; i < MAX_PARTITIONS; i++) {
+		if (vms[i].vm_id == INVALID_VM_ID) {
+			vms[i].vm_id = partition_id;
+			return 0;
+		}
+	}
+	return -ENOMEM;
+}
+
 static ffa_fn *invoke_ffa_fn;
 
 static const int ffa_linux_errmap[] = {
@@ -159,6 +199,11 @@ static const int ffa_linux_errmap[] = {
 	-EAGAIN,	/* FFA_RET_RETRY */
 	-ECANCELED,	/* FFA_RET_ABORTED */
 };
+
+static inline bool is_secure_world(ffa_partition_id_t vm_id)
+{
+	return vm_id & SECURE_WORLD_MASK;
+}
 
 static inline int ffa_to_linux_errno(int errno)
 {
@@ -177,6 +222,18 @@ struct ffa_drv_info {
 	void *rx_buffer;
 	void *tx_buffer;
 };
+
+/* One time array initalisation functions. */
+static void initialise_vm_structs(struct vm *vm, int size)
+{
+	int i;
+	for (i=0; i < size; i++) {
+		vms[i].vm_id = INVALID_VM_ID;
+		vms[i].sched_recv_callback = NULL;
+		vms[i].sched_recv_callback_data = NULL;
+		rwlock_init(&vms[i].sched_recv_lock);
+	}
+}
 
 static struct ffa_drv_info *drv_info;
 
@@ -625,6 +682,54 @@ ffa_memory_share(struct ffa_device *dev, struct ffa_mem_ops_args *args)
 	return ffa_memory_ops(FFA_FN_NATIVE(MEM_SHARE), args);
 }
 
+
+/* Schedule Receiver Registration functions */
+static int
+update_schedule_receiver_callback(ffa_partition_id_t partition_id, ffa_sched_recv_callback callback,
+					void *callback_data, bool is_registration)
+{
+	int ret = 0;
+	struct vm *vm = get_vm_struct(partition_id);
+	write_lock(&vm->sched_recv_lock);
+
+	if (is_registration){
+		if (vm->sched_recv_callback != NULL) {
+			pr_err("Notification callback already registered for partition: 0x%x\n",  partition_id);
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+	else {
+		if (vm->sched_recv_callback == NULL) {
+			pr_err("Notification callback was not registered for partition: 0x%x\n",  partition_id);
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	vm->sched_recv_callback = callback;
+	vm->sched_recv_callback_data = callback_data;
+
+	pr_debug("Notification callback updated for partition: 0x%x\n", partition_id);
+
+out:
+	write_unlock(&vm->sched_recv_lock);
+	return ret;
+}
+
+static int
+ffa_register_schedule_receiver_callback(struct ffa_device *dev, ffa_sched_recv_callback callback,
+					void *callback_data)
+{
+	return update_schedule_receiver_callback(dev->vm_id, callback, callback_data, true);
+}
+
+static int
+ffa_unregister_schedule_receiver_callback(struct ffa_device *dev)
+{
+	return update_schedule_receiver_callback(dev->vm_id, NULL, NULL, false);
+}
+
 static const struct ffa_dev_ops ffa_ops = {
 	.api_version_get = ffa_api_version_get,
 	.partition_info_get = ffa_partition_info_get,
@@ -632,6 +737,8 @@ static const struct ffa_dev_ops ffa_ops = {
 	.sync_send_receive = ffa_sync_send_receive,
 	.memory_reclaim = ffa_memory_reclaim,
 	.memory_share = ffa_memory_share,
+	.register_schedule_receiver_callback = ffa_register_schedule_receiver_callback,
+	.unregister_schedule_receiver_callback = ffa_unregister_schedule_receiver_callback,
 };
 
 const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
@@ -686,6 +793,11 @@ static void ffa_setup_partitions(void)
 		}
 
 		ffa_dev_set_drvdata(ffa_dev, drv_info);
+
+		if (allocate_vm_struct(tpbuf->id)) {
+			pr_err("%s: failed to assign partition struct for partition ID 0x%x\n",
+			       __func__, tpbuf->id);
+		}
 	}
 	kfree(pbuf);
 }
@@ -843,6 +955,8 @@ static int __init ffa_init(void)
 
 	mutex_init(&drv_info->rx_lock);
 	mutex_init(&drv_info->tx_lock);
+
+	initialise_vm_structs(vms, MAX_PARTITIONS);
 
 	ffa_setup_partitions();
 

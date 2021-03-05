@@ -37,6 +37,18 @@ struct ffa_driver {
 typedef u16 ffa_partition_id_t;
 typedef u16 ffa_vcpu_id_t;
 
+/* Notification Related */
+typedef void(*ffa_sched_recv_callback)(ffa_partition_id_t partition_id, ffa_vcpu_id_t vcpu,
+				       bool is_per_vcpu, void *callback_data);
+
+/* Store extra information related to a given partition. */
+struct vm {
+	ffa_partition_id_t vm_id;
+	ffa_sched_recv_callback sched_recv_callback;
+	void *sched_recv_callback_data;
+	rwlock_t sched_recv_lock;
+};
+
 #define to_ffa_driver(d) container_of(d, struct ffa_driver, driver)
 
 static inline void ffa_dev_set_drvdata(struct ffa_device *fdev, void *data)
@@ -265,6 +277,12 @@ struct ffa_dev_ops {
 	int (*memory_reclaim)(u64 g_handle, u32 flags);
 	int (*memory_share)(struct ffa_device *dev,
 			    struct ffa_mem_ops_args *args);
+	int (*register_schedule_receiver_callback)
+			(struct ffa_device *dev,
+			ffa_sched_recv_callback callback,
+			void *sched_recv_callback_data);
+	int (*unregister_schedule_receiver_callback)
+			(struct ffa_device *dev);
 };
 
 #endif /* _LINUX_ARM_FFA_H */
