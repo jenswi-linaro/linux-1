@@ -50,6 +50,7 @@
 
 #define FFA_ERROR			FFA_SMC_32(0x60)
 #define FFA_SUCCESS			FFA_SMC_32(0x61)
+#define FFA_FN64_SUCCESS		FFA_SMC_64(0x61)
 #define FFA_INTERRUPT			FFA_SMC_32(0x62)
 #define FFA_VERSION			FFA_SMC_32(0x63)
 #define FFA_FEATURES			FFA_SMC_32(0x64)
@@ -84,6 +85,7 @@
 #define FFA_MEM_FRAG_RX			FFA_SMC_32(0x7A)
 #define FFA_MEM_FRAG_TX			FFA_SMC_32(0x7B)
 #define FFA_NORMAL_WORLD_RESUME		FFA_SMC_32(0x7C)
+#define FFA_NOTIFICATION_INFO_GET	FFA_SMC_32(0x83)
 
 /*
  * For some calls it is necessary to use SMC64 to pass or return 64-bit values.
@@ -106,6 +108,7 @@
 #define FFA_RET_DENIED             (-6)
 #define FFA_RET_RETRY              (-7)
 #define FFA_RET_ABORTED            (-8)
+#define FFA_RET_NO_DATA            (-9)
 
 #define MAJOR_VERSION_MASK	GENMASK(30, 16)
 #define MINOR_VERSION_MASK	GENMASK(15, 0)
@@ -333,6 +336,19 @@ static int ffa_rxtx_unmap(u16 vm_id)
 	return 0;
 }
 
+static void __do_schedule_receiver_callback(ffa_partition_id_t partition_id, ffa_vcpu_id_t vcpu, bool is_per_vcpu)
+{
+	struct vm *vm = get_vm_struct(partition_id);
+	read_lock(&vm->sched_recv_lock);
+
+	if (vm->sched_recv_callback == NULL){
+		pr_err("Callback for partition 0x%x failed.\n", partition_id);
+		return;
+	}
+	vm->sched_recv_callback(partition_id, vcpu, is_per_vcpu, vm->sched_recv_callback_data);
+	read_unlock(&vm->sched_recv_lock);
+}
+
 /* buffer must be sizeof(struct ffa_partition_info) * num_partitions */
 static int
 __ffa_partition_info_get(u32 uuid0, u32 uuid1, u32 uuid2, u32 uuid3,
@@ -408,6 +424,112 @@ static int ffa_id_get(u16 *vm_id)
 
 	return 0;
 }
+
+/* Notification Info Get Related */
+#define NOTIFICATION_INFO_GET_PARTITION_ID_MASK GENMASK(15, 0)
+#define NOTIFICATION_INFO_GET_MORE_PENDING	GENMASK(1, 0)
+#define NOTIFICATION_INFO_GET_ID_COUNT		GENMASK(11, 7)
+#define PARTITION_ID_SIZE 16
+
+#define MAX_IDS_64 20
+#define ID_LIST_MASK_64 GENMASK(63, 12)
+
+/* Allow indexing into the IDs returned by a notification info get call. */
+static u16 __unpack_info_get_id(ffa_value_t *ret, u32 idx)
+{
+	u16 *packed_id_list;
+	/* Ensure we can only index into valid IDs.*/
+	if (idx >= MAX_IDS_64) {
+		pr_err("Attempting to access invalid ID\n");
+		return 0;
+	}
+	/* The response from a partition info get call is a packed list of
+	 * partition and vcpu IDs. Therfore we can cast the field containing
+	 * the first ID into an array of 16 bit IDs and index accordingly. */
+	packed_id_list = (u16*) &ret->a3;
+	/* Return the partiion ID return at the corresponding index. */
+	return packed_id_list[idx];
+}
+
+static void ffa_notification_info_get64(void)
+{
+	ffa_value_t ret;
+	bool call_again;
+	u8 count_of_lists;
+
+	u8 ids_processed;
+	u8 total_ids = 0;
+	u16 ids_count[MAX_IDS_64];
+	u32 idx, list;
+	u64 id_list;
+
+	pr_debug("Calling Notification Info Get handling on cpu %d\n", smp_processor_id());
+
+	do {
+		invoke_ffa_fn((ffa_value_t){
+			/* Note: We currently only support the 64 bit version of this interface. */
+			  .a0 = FFA_SMC_64(FFA_NOTIFICATION_INFO_GET)
+			  }, &ret);
+
+		if (ret.a0 == FFA_ERROR) {
+			if (ret.a2 == FFA_RET_NO_DATA) {
+				pr_debug("No data available for Notification Info Get\n");
+				return;
+			}
+			pr_err("Notification Info Get Failed: 0x%lx(0x%lx)", ret.a0, ret.a2);
+			return;
+		}
+		else if (ret.a0 == FFA_SUCCESS) {
+			pr_err("Received a 32bit response to a 64bit call.");
+			return; /* Something else went wrong. */
+		}
+
+		ids_processed = 0;
+		call_again = FIELD_GET(NOTIFICATION_INFO_GET_MORE_PENDING, (ret.a2));
+		count_of_lists = FIELD_GET(NOTIFICATION_INFO_GET_ID_COUNT, (ret.a2));
+		id_list =  FIELD_GET(ID_LIST_MASK_64, (ret.a2));
+
+		/* Process ID list and count how many ids we have to process */
+		for (idx=0; idx < count_of_lists; idx++) {
+			/* Note ID count begins at 0. */
+			ids_count[idx] = (id_list & 0x3);
+			total_ids += ids_count[idx];
+			id_list = id_list >> 2;
+		}
+
+		/* Process IDs */
+		/* For each notification make our call back */
+		for (list = 0; list < count_of_lists; list++) {
+			u16 partition_id;
+
+			if (ids_processed >= MAX_IDS_64){
+				pr_err("Maximum IDs Exceeded!\n");
+				break;
+			}
+
+			/* The next ID to unpack is a partition ID, retrieve and increment processed ID count. */
+			partition_id = __unpack_info_get_id(&ret, ids_processed++);
+
+			/* Global Notification, no vcpu IDs to process. */
+			if (ids_count[list] == 0) {
+				pr_debug("Calling global schedule receiver callback for 0x%x\n", partition_id);
+				__do_schedule_receiver_callback(partition_id, 0, false);
+			}
+			/* Per vCPU Notification, process X IDs based on length of list specified. */
+			else {
+				/* Use IDs count (count from 0) as vcpu count. */
+				for (idx = 0; idx < ids_count[list]; idx++) {
+					/* The next ID to unpack is a vcpu ID, retrieve and increment count. */
+					u16 vcpu_id = __unpack_info_get_id(&ret, ids_processed++);
+					pr_debug("Calling schedule receiver callback for 0x%x for vcpu: %d\n",
+						partition_id, vcpu_id);
+					__do_schedule_receiver_callback(partition_id, vcpu_id, true);
+				}
+			}
+		}
+	} while(call_again);
+}
+
 
 static int ffa_msg_send_direct_req(ffa_partition_id_t src_id, ffa_partition_id_t dst_id, bool mode_32bit,
 				   struct ffa_send_direct_data *data)
@@ -826,6 +948,7 @@ static int ffa_features(u32 function_id, u32 feature_id)
 /* Handle an SGI */
 static irqreturn_t irq_handler(int irq, void *dev)
 {
+	ffa_notification_info_get64();
 	return IRQ_HANDLED;
 }
 
