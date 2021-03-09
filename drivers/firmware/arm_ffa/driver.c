@@ -85,6 +85,8 @@
 #define FFA_MEM_FRAG_RX			FFA_SMC_32(0x7A)
 #define FFA_MEM_FRAG_TX			FFA_SMC_32(0x7B)
 #define FFA_NORMAL_WORLD_RESUME		FFA_SMC_32(0x7C)
+#define FFA_NOTIFICATION_BIND		FFA_SMC_32(0x7F)
+#define FFA_NOTIFICATION_UNBIND		FFA_SMC_32(0x80)
 #define FFA_NOTIFICATION_SET		FFA_SMC_32(0x81)
 #define FFA_NOTIFICATION_GET		FFA_SMC_32(0x82)
 #define FFA_NOTIFICATION_INFO_GET	FFA_SMC_32(0x83)
@@ -541,6 +543,42 @@ static void ffa_notification_info_get64(void)
 			}
 		}
 	} while(call_again);
+}
+
+static int __ffa_notification_bind_common(ffa_partition_id_t dst_id, u32 flags,
+					  u64 notifications_bitmap, bool is_bind)
+{
+	u32 func;
+	ffa_value_t ret;
+	ffa_partition_id_t src_id = drv_info->vm_id;
+	u32 not_lo, not_hi, send_rec_ids = PACK_TARGET_INFO(dst_id, src_id);
+
+	not_lo = GET_NOTIFICATION_BITMAP_LO(notifications_bitmap);
+	not_hi = GET_NOTIFICATION_BITMAP_HI(notifications_bitmap);
+
+	func = is_bind ? FFA_NOTIFICATION_BIND : FFA_NOTIFICATION_UNBIND;
+
+	invoke_ffa_fn((ffa_value_t){
+		  .a0 = func, .a1 = send_rec_ids, .a2 = flags,
+		  .a3 = not_lo, .a4 = not_hi,
+		  }, &ret);
+
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
+	else if (ret.a0 != FFA_SUCCESS)
+		return -EINVAL; /* Something else went wrong. */
+
+	return 0;
+}
+
+static int ffa_notification_bind(ffa_partition_id_t dst_id, u32 flags, u64 notifications_bitmap)
+{
+	return __ffa_notification_bind_common(dst_id, flags, notifications_bitmap, true);
+}
+
+static int ffa_notification_unbind(ffa_partition_id_t dst_id, u64 notifications_bitmap)
+{
+	return __ffa_notification_bind_common(dst_id, 0, notifications_bitmap, false);
 }
 
 static int ffa_notification_set(ffa_partition_id_t src_id, ffa_partition_id_t dst_id,
