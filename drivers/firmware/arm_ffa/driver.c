@@ -85,6 +85,7 @@
 #define FFA_MEM_FRAG_RX			FFA_SMC_32(0x7A)
 #define FFA_MEM_FRAG_TX			FFA_SMC_32(0x7B)
 #define FFA_NORMAL_WORLD_RESUME		FFA_SMC_32(0x7C)
+#define FFA_NOTIFICATION_GET		FFA_SMC_32(0x82)
 #define FFA_NOTIFICATION_INFO_GET	FFA_SMC_32(0x83)
 
 /*
@@ -124,8 +125,19 @@
 #define RECEIVER_ID_MASK	GENMASK(15, 0)
 #define SENDER_ID(x)		((u16)(FIELD_GET(SENDER_ID_MASK, (x))))
 #define RECEIVER_ID(x)		((u16)(FIELD_GET(RECEIVER_ID_MASK, (x))))
+
+#define RECEIVER_vCPU_MASK	GENMASK(31, 16)
+#define NOTIFICATIONS_LO_MASK	GENMASK(31, 0)
+#define NOTIFICATIONS_HI_MASK	GENMASK(63, 32)
+
 #define PACK_TARGET_INFO(s, r)		\
 	(FIELD_PREP(SENDER_ID_MASK, (s)) | FIELD_PREP(RECEIVER_ID_MASK, (r)))
+#define PACK_NOTIFICATION_GET_RECEIVER_INFO(c, e)		\
+	(FIELD_PREP(RECEIVER_vCPU_MASK, (c)) | FIELD_PREP(RECEIVER_ID_MASK, (e)))
+#define UNPACK_NOTIFICATION_BITMAPS(h, l)	\
+	((h) << 32 | (l))
+#define GET_NOTIFICATION_BITMAP_HI(x)	(u32)(FIELD_GET(NOTIFICATIONS_HI_MASK, (x)))
+#define GET_NOTIFICATION_BITMAP_LO(x)	(u32)(FIELD_GET(NOTIFICATIONS_LO_MASK, (x)))
 
 /*
  * FF-A specification mentions explicitly about '4K pages'. This should
@@ -530,6 +542,28 @@ static void ffa_notification_info_get64(void)
 	} while(call_again);
 }
 
+static int ffa_notification_get(u32 flags, struct ffa_notification_bitmaps *notifications)
+{
+	ffa_value_t ret;
+	ffa_partition_id_t src_id = drv_info->vm_id;
+	u16 cpu_id = smp_processor_id();
+	u32 rec_vcpu_ids = PACK_NOTIFICATION_GET_RECEIVER_INFO(cpu_id, src_id);
+
+ 	invoke_ffa_fn((ffa_value_t){
+		  .a0 = FFA_NOTIFICATION_GET, .a1 = rec_vcpu_ids, .a2 = flags,
+		  }, &ret);
+
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
+	else if (ret.a0 != FFA_SUCCESS)
+		return -EINVAL; /* Something else went wrong. */
+
+	notifications->sp_notifications = UNPACK_NOTIFICATION_BITMAPS(ret.a3, ret.a2);
+	notifications->vm_notifications = UNPACK_NOTIFICATION_BITMAPS(ret.a5, ret.a4);
+	notifications->architected_notifications = UNPACK_NOTIFICATION_BITMAPS(ret.a7, ret.a6);
+
+	return 0;
+}
 
 static int ffa_msg_send_direct_req(ffa_partition_id_t src_id, ffa_partition_id_t dst_id, bool mode_32bit,
 				   struct ffa_send_direct_data *data)

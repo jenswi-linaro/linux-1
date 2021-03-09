@@ -49,6 +49,12 @@ struct vm {
 	rwlock_t sched_recv_lock;
 };
 
+struct ffa_notification_bitmaps {
+	u64 sp_notifications;
+	u64 vm_notifications;
+	u64 architected_notifications;
+};
+
 #define to_ffa_driver(d) container_of(d, struct ffa_driver, driver)
 
 static inline void ffa_dev_set_drvdata(struct ffa_device *fdev, void *data)
