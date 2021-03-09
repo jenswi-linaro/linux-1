@@ -85,6 +85,7 @@
 #define FFA_MEM_FRAG_RX			FFA_SMC_32(0x7A)
 #define FFA_MEM_FRAG_TX			FFA_SMC_32(0x7B)
 #define FFA_NORMAL_WORLD_RESUME		FFA_SMC_32(0x7C)
+#define FFA_NOTIFICATION_SET		FFA_SMC_32(0x81)
 #define FFA_NOTIFICATION_GET		FFA_SMC_32(0x82)
 #define FFA_NOTIFICATION_INFO_GET	FFA_SMC_32(0x83)
 
@@ -540,6 +541,29 @@ static void ffa_notification_info_get64(void)
 			}
 		}
 	} while(call_again);
+}
+
+static int ffa_notification_set(ffa_partition_id_t src_id, ffa_partition_id_t dst_id,
+				u32 flags, u64 notifications_bitmap)
+{
+	ffa_value_t ret;
+	u32 not_lo, not_hi, src_dst_ids = PACK_TARGET_INFO(dst_id, src_id);
+
+	not_hi = GET_NOTIFICATION_BITMAP_HI(notifications_bitmap);
+	not_lo = GET_NOTIFICATION_BITMAP_LO(notifications_bitmap);
+
+	invoke_ffa_fn((ffa_value_t) {
+		  .a0 = FFA_NOTIFICATION_SET, .a1 = src_dst_ids, .a2 = flags,
+		  .a3 = not_lo, .a4 = not_hi,
+		  }, &ret);
+
+
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
+	else if (ret.a0 != FFA_SUCCESS)
+		return -EINVAL; /* Something else went wrong. */
+
+	return 0;
 }
 
 static int ffa_notification_get(u32 flags, struct ffa_notification_bitmaps *notifications)
