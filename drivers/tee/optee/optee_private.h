@@ -7,6 +7,7 @@
 #define OPTEE_PRIVATE_H
 
 #include <linux/arm-smccc.h>
+#include <linux/rhashtable.h>
 #include <linux/semaphore.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
@@ -20,6 +21,7 @@
 #define TEEC_ERROR_NOT_SUPPORTED	0xFFFF000A
 #define TEEC_ERROR_COMMUNICATION	0xFFFF000E
 #define TEEC_ERROR_OUT_OF_MEMORY	0xFFFF000C
+#define TEEC_ERROR_BUSY			0xFFFF000D
 #define TEEC_ERROR_SHORT_BUFFER		0xFFFF0010
 
 #define TEEC_ORIGIN_COMMS		0x00000002
@@ -64,6 +66,22 @@ struct optee_supp {
 	struct list_head reqs;
 	struct idr idr;
 	struct completion reqs_c;
+};
+
+/**
+ * struct optee_ffa_data -  FFA communication struct
+ * @ffa_dev		FFA device, contains the destination id, the id of
+ *			OP-TEE in secure world
+ * @ffa_ops		FFA operations
+ * @mutex		Serializes access to @global_ids
+ * @global_ids		FF-A shared memory global handle translation
+ */
+struct optee_ffa {
+	struct ffa_device *ffa_dev;
+	const struct ffa_dev_ops *ffa_ops;
+	/* Serializes access to @global_ids */
+	struct mutex mutex;
+	struct rhashtable global_ids;
 };
 
 struct optee;
@@ -113,11 +131,15 @@ struct optee {
 	struct tee_device *teedev;
 	const struct optee_ops *ops;
 	optee_invoke_fn *invoke_fn;
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+	struct optee_ffa ffa;
+#endif
 	struct optee_call_queue call_queue;
 	struct optee_wait_queue wait_queue;
 	struct optee_supp supp;
 	struct tee_shm_pool *pool;
 	void *memremaped_shm;
+	unsigned int rpc_arg_count;
 	u32 sec_caps;
 	bool   scan_bus_done;
 	struct workqueue_struct *scan_bus_wq;
@@ -205,6 +227,36 @@ void optee_fill_pages_list(u64 *dst, struct page **pages, int num_pages,
 #define PTA_CMD_GET_DEVICES		0x0
 #define PTA_CMD_GET_DEVICES_SUPP	0x1
 int optee_enumerate_devices(u32 func);
+
+int optee_shm_add_ffa_handle(struct optee *optee, struct tee_shm *shm,
+			     u64 global_id);
+int optee_shm_rem_ffa_handle(struct optee *optee, u64 global_id);
+
+struct tee_shm *optee_shm_from_ffa_handle(struct optee *optee, u64 global_id);
+
+int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			   struct page **pages, size_t num_pages,
+			   unsigned long start);
+int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm);
+int optee_ffa_shm_register_supp(struct tee_context *ctx, struct tee_shm *shm,
+				struct page **pages, size_t num_pages,
+				unsigned long start);
+int optee_ffa_shm_unregister_supp(struct tee_context *ctx,
+				  struct tee_shm *shm);
+
+int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg);
+int optee_ffa_rpc_shm_register(struct tee_context *ctx, struct tee_shm *shm);
+void optee_handle_ffa_rpc(struct tee_context *ctx, u32 cmd,
+			  struct optee_msg_arg *arg);
+
+static inline bool optee_is_ffa_based(struct optee *optee)
+{
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+	return optee->ffa.ffa_ops;
+#else
+	return false;
+#endif
+}
 
 /*
  * Small helpers

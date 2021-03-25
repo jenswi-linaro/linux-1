@@ -3,17 +3,20 @@
  * Copyright (c) 2015-2021, Linaro Limited
  */
 #include <linux/arm-smccc.h>
+#include <linux/arm_ffa.h>
 #include <linux/device.h>
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
+#include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
 #include "optee_private.h"
 #include "optee_smc.h"
+#include "optee_ffa.h"
 
 struct optee_call_waiter {
 	struct list_head list_node;
@@ -180,29 +183,33 @@ int optee_do_call_with_arg(struct tee_context *ctx, struct tee_shm *arg)
 static struct tee_shm *get_msg_arg(struct tee_context *ctx, size_t num_params,
 				   struct optee_msg_arg **msg_arg)
 {
-	int rc;
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	size_t sz = OPTEE_MSG_GET_ARG_SIZE(num_params);
 	struct tee_shm *shm;
 	struct optee_msg_arg *ma;
 
-	shm = tee_shm_alloc(ctx, OPTEE_MSG_GET_ARG_SIZE(num_params),
-			    TEE_SHM_MAPPED);
+	/*
+	 * rpc_arg_count is set to the number of allocated parameters in
+	 * the RPC argument struct if a second MSG arg struct is expected.
+	 * The second arg struct will then be used for RPC. So far only
+	 * enabled when using FF-A as transport layer.
+	 */
+	if (optee->rpc_arg_count)
+		sz += OPTEE_MSG_GET_ARG_SIZE(optee->rpc_arg_count);
+
+	shm = tee_shm_alloc(ctx, sz, TEE_SHM_MAPPED);
 	if (IS_ERR(shm))
 		return shm;
 
 	ma = tee_shm_get_va(shm, 0);
 	if (IS_ERR(ma)) {
-		rc = PTR_ERR(ma);
-		goto out;
+		tee_shm_free(shm);
+		return (void *)ma;
 	}
 
 	memset(ma, 0, OPTEE_MSG_GET_ARG_SIZE(num_params));
 	ma->num_params = num_params;
 	*msg_arg = ma;
-out:
-	if (rc) {
-		tee_shm_free(shm);
-		return ERR_PTR(rc);
-	}
 
 	return shm;
 }
@@ -677,3 +684,198 @@ int optee_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
 {
 	return 0;
 }
+
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static int optee_ffa_yielding_call(struct tee_context *ctx,
+				   struct ffa_send_direct_data *data,
+				   struct optee_msg_arg *rpc_arg)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+	struct ffa_device *ffa_dev = optee->ffa.ffa_dev;
+	struct optee_call_waiter w;
+	u32 cmd = data->data0;
+	u32 w4 = data->data1;
+	u32 w5 = data->data2;
+	u32 w6 = data->data3;
+	int rc;
+
+	/* Initialize waiter */
+	optee_cq_wait_init(&optee->call_queue, &w);
+	while (true) {
+		rc = ffa_ops->sync_send_receive(ffa_dev, data);
+		if (rc)
+			goto done;
+
+		switch ((int)data->data0) {
+		case TEEC_SUCCESS:
+			break;
+		case TEEC_ERROR_BUSY:
+			if (cmd == OPTEE_FFA_YIELDING_CALL_RESUME) {
+				rc = -EIO;
+				goto done;
+			}
+
+			/*
+			 * Out of threads in secure world, wait for a thread
+			 * become available.
+			 */
+			optee_cq_wait_for_completion(&optee->call_queue, &w);
+			data->data0 = cmd;
+			data->data1 = w4;
+			data->data2 = w5;
+			data->data3 = w6;
+			continue;
+		default:
+			rc = -EIO;
+			goto done;
+		}
+
+		if (data->data1 == OPTEE_FFA_YIELDING_CALL_RETURN_DONE)
+			goto done;
+
+		/*
+		 * OP-TEE has returned with a RPC request.
+		 *
+		 * Note that data->data4 (passed in register w7) is already
+		 * filled in by ffa_ops->sync_send_receive() returning
+		 * above.
+		 */
+		cond_resched();
+		optee_handle_ffa_rpc(ctx, data->data1, rpc_arg);
+		cmd = OPTEE_FFA_YIELDING_CALL_RESUME;
+		data->data0 = cmd;
+		data->data1 = 0;
+		data->data2 = 0;
+		data->data3 = 0;
+	}
+done:
+	/*
+	 * We're done with our thread in secure world, if there's any
+	 * thread waiters wake up one.
+	 */
+	optee_cq_wait_final(&optee->call_queue, &w);
+
+	return rc;
+}
+
+/**
+ * optee_ffa_do_call_with_arg() - Do a FF-A call to enter OP-TEE in secure world
+ * @ctx:	calling context
+ * @shm:	shared memory holding the message to pass to secure world
+ *
+ * Does a FF-A call to OP-TEE in secure world and handles eventual resulting
+ * Remote Procedure Calls (RPC) from OP-TEE.
+ *
+ * Returns return code from FF-A, 0 is OK
+ */
+
+int optee_ffa_do_call_with_arg(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct ffa_send_direct_data data = {
+		.data0 = OPTEE_FFA_YIELDING_CALL_WITH_ARG,
+		.data1 = (u32)shm->sec_world_id,
+		.data2 = (u32)(shm->sec_world_id >> 32),
+		.data3 = shm->offset,
+	};
+	struct optee_msg_arg *arg = tee_shm_get_va(shm, 0);
+	unsigned int rpc_arg_offs = OPTEE_MSG_GET_ARG_SIZE(arg->num_params);
+	struct optee_msg_arg *rpc_arg = tee_shm_get_va(shm, rpc_arg_offs);
+
+	return optee_ffa_yielding_call(ctx, &data, rpc_arg);
+}
+
+int optee_ffa_shm_register(struct tee_context *ctx, struct tee_shm *shm,
+			   struct page **pages, size_t num_pages,
+			   unsigned long start)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+	struct ffa_device *ffa_dev = optee->ffa.ffa_dev;
+	struct ffa_mem_region_attributes mem_attr = {
+		.receiver = ffa_dev->vm_id,
+		.attrs = FFA_MEM_RW,
+	};
+	struct ffa_mem_ops_args args = {
+		.use_txbuf = true,
+		.attrs = &mem_attr,
+		.nattrs = 1,
+	};
+	struct sg_table sgt;
+	int rc;
+
+	rc = check_mem_type(start, num_pages);
+	if (rc)
+		return rc;
+
+	rc = sg_alloc_table_from_pages(&sgt, pages, num_pages, 0,
+				       num_pages * PAGE_SIZE, GFP_KERNEL);
+	if (rc)
+		return rc;
+	args.sg = sgt.sgl;
+	rc = ffa_ops->memory_share(ffa_dev, &args);
+	sg_free_table(&sgt);
+	if (rc)
+		return rc;
+
+	rc = optee_shm_add_ffa_handle(optee, shm, args.g_handle);
+	if (rc) {
+		ffa_ops->memory_reclaim(args.g_handle, 0);
+		return rc;
+	}
+
+	shm->sec_world_id = args.g_handle;
+
+	return 0;
+}
+
+int optee_ffa_shm_unregister(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+	struct ffa_device *ffa_dev = optee->ffa.ffa_dev;
+	u64 global_handle = shm->sec_world_id;
+	struct ffa_send_direct_data data = {
+		.data0 = OPTEE_FFA_UNREGISTER_SHM,
+		.data1 = (u32)global_handle,
+		.data2 = (u32)(global_handle >> 32)
+	};
+	int rc;
+
+	optee_shm_rem_ffa_handle(optee, global_handle);
+	shm->sec_world_id = 0;
+
+	rc = ffa_ops->sync_send_receive(ffa_dev, &data);
+	if (rc)
+		pr_err("Unregister SHM id 0x%llx rc %d\n", global_handle, rc);
+
+	rc = ffa_ops->memory_reclaim(global_handle, 0);
+	if (rc)
+		pr_err("mem_reclain: 0x%llx %d", global_handle, rc);
+
+	return rc;
+}
+
+int optee_ffa_shm_unregister_supp(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+	u64 global_handle = shm->sec_world_id;
+	int rc;
+
+	/*
+	 * We're skipping the OPTEE_FFA_YIELDING_CALL_UNREGISTER_SHM call
+	 * since this is OP-TEE freeing via RPC so it has already retired
+	 * this ID.
+	 */
+
+	optee_shm_rem_ffa_handle(optee, global_handle);
+	rc = ffa_ops->memory_reclaim(global_handle, 0);
+	if (rc)
+		pr_err("mem_reclain: 0x%llx %d", global_handle, rc);
+
+	shm->sec_world_id = 0;
+
+	return rc;
+}
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/

@@ -10,6 +10,7 @@
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/tee_drv.h>
+#include "optee_ffa.h"
 #include "optee_msg.h"
 #include "optee_private.h"
 #include "optee_rpc_cmd.h"
@@ -543,3 +544,120 @@ void optee_handle_rpc(struct tee_context *ctx, struct optee_rpc_param *param,
 
 	param->a0 = OPTEE_SMC_CALL_RETURN_FROM_RPC;
 }
+
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static void handle_ffa_rpc_func_cmd_shm_alloc(struct tee_context *ctx,
+					      struct optee_msg_arg *arg)
+{
+	struct tee_shm *shm;
+
+	if (arg->num_params != 1 ||
+	    arg->params[0].attr != OPTEE_MSG_ATTR_TYPE_VALUE_INPUT) {
+		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
+		return;
+	}
+
+	switch (arg->params[0].u.value.a) {
+	case OPTEE_RPC_SHM_TYPE_APPL:
+		shm = cmd_alloc_suppl(ctx, arg->params[0].u.value.b);
+		break;
+	case OPTEE_RPC_SHM_TYPE_KERNEL:
+		shm = tee_shm_alloc(ctx, arg->params[0].u.value.b,
+				    TEE_SHM_MAPPED);
+		break;
+	default:
+		arg->ret = TEEC_ERROR_BAD_PARAMETERS;
+		return;
+	}
+
+	if (IS_ERR(shm)) {
+		arg->ret = TEEC_ERROR_OUT_OF_MEMORY;
+		return;
+	}
+
+	arg->params[0] = (struct optee_msg_param){
+		.attr = OPTEE_MSG_ATTR_TYPE_FMEM_OUTPUT,
+		.u.fmem.size = tee_shm_get_size(shm),
+		.u.fmem.global_id = shm->sec_world_id,
+		.u.fmem.internal_offs = shm->offset,
+	};
+
+	arg->ret = TEEC_SUCCESS;
+}
+
+static void handle_ffa_rpc_func_cmd_shm_free(struct tee_context *ctx,
+					     struct optee *optee,
+					     struct optee_msg_arg *arg)
+{
+	struct tee_shm *shm;
+
+	if (arg->num_params != 1 ||
+	    arg->params[0].attr != OPTEE_MSG_ATTR_TYPE_VALUE_INPUT)
+		goto err_bad_param;
+
+	shm = optee_shm_from_ffa_handle(optee, arg->params[0].u.value.b);
+	if (!shm)
+		goto err_bad_param;
+	switch (arg->params[0].u.value.a) {
+	case OPTEE_RPC_SHM_TYPE_APPL:
+		cmd_free_suppl(ctx, shm);
+		break;
+	case OPTEE_RPC_SHM_TYPE_KERNEL:
+		tee_shm_free(shm);
+		break;
+	default:
+		goto err_bad_param;
+	}
+	arg->ret = TEEC_SUCCESS;
+	return;
+
+err_bad_param:
+	arg->ret = TEEC_ERROR_BAD_PARAMETERS;
+}
+
+static void handle_ffa_rpc_func_cmd(struct tee_context *ctx,
+				    struct optee_msg_arg *arg)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	arg->ret_origin = TEEC_ORIGIN_COMMS;
+	switch (arg->cmd) {
+	case OPTEE_RPC_CMD_GET_TIME:
+		handle_rpc_func_cmd_get_time(arg);
+		break;
+	case OPTEE_RPC_CMD_WAIT_QUEUE:
+		handle_rpc_func_cmd_wq(optee, arg);
+		break;
+	case OPTEE_RPC_CMD_SUSPEND:
+		handle_rpc_func_cmd_wait(arg);
+		break;
+	case OPTEE_RPC_CMD_SHM_ALLOC:
+		handle_ffa_rpc_func_cmd_shm_alloc(ctx, arg);
+		break;
+	case OPTEE_RPC_CMD_SHM_FREE:
+		handle_ffa_rpc_func_cmd_shm_free(ctx, optee, arg);
+		break;
+	case OPTEE_MSG_RPC_CMD_I2C_TRANSFER:
+		handle_rpc_func_cmd_i2c_transfer(ctx, arg);
+		break;
+	default:
+		handle_rpc_supp_cmd(ctx, optee, arg);
+	}
+}
+
+void optee_handle_ffa_rpc(struct tee_context *ctx, u32 cmd,
+			  struct optee_msg_arg *arg)
+{
+	switch (cmd) {
+	case OPTEE_FFA_YIELDING_CALL_RETURN_RPC_CMD:
+		handle_ffa_rpc_func_cmd(ctx, arg);
+		break;
+	case OPTEE_FFA_YIELDING_CALL_RETURN_INTERRUPT:
+		/* Interrupt delivered by now */
+		break;
+	default:
+		pr_warn("Unknown RPC func 0x%x\n", cmd);
+		break;
+	}
+}
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/
