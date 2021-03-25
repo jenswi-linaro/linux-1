@@ -12,8 +12,14 @@
 #include "optee_smc.h"
 #include "shm_pool.h"
 
-static int pool_op_alloc(struct tee_shm_pool_mgr *poolm,
-			 struct tee_shm *shm, size_t size)
+static int
+pool_op_alloc_helper(struct tee_shm_pool_mgr *poolm,
+		     struct tee_shm *shm, size_t size,
+		     int (*shm_register)(struct tee_context *ctx,
+					 struct tee_shm *shm,
+					 struct page **pages,
+					 size_t num_pages,
+					 unsigned long start))
 {
 	unsigned int order = get_order(size);
 	struct page *page;
@@ -27,7 +33,7 @@ static int pool_op_alloc(struct tee_shm_pool_mgr *poolm,
 	shm->paddr = page_to_phys(page);
 	shm->size = PAGE_SIZE << order;
 
-	if (shm->flags & TEE_SHM_DMA_BUF) {
+	if (shm_register) {
 		unsigned int nr_pages = 1 << order, i;
 		struct page **pages;
 
@@ -41,12 +47,21 @@ static int pool_op_alloc(struct tee_shm_pool_mgr *poolm,
 		}
 
 		shm->flags |= TEE_SHM_REGISTER;
-		rc = optee_shm_register(shm->ctx, shm, pages, nr_pages,
-					(unsigned long)shm->kaddr);
+		rc = shm_register(shm->ctx, shm, pages, nr_pages,
+				  (unsigned long)shm->kaddr);
 		kfree(pages);
 	}
 
 	return rc;
+}
+
+static int pool_op_alloc(struct tee_shm_pool_mgr *poolm,
+			 struct tee_shm *shm, size_t size)
+{
+	if (!(shm->flags & TEE_SHM_DMA_BUF))
+		return pool_op_alloc_helper(poolm, shm, size, NULL);
+
+	return pool_op_alloc_helper(poolm, shm, size, optee_shm_register);
 }
 
 static void pool_op_free(struct tee_shm_pool_mgr *poolm,
@@ -87,3 +102,43 @@ struct tee_shm_pool_mgr *optee_shm_pool_alloc_pages(void)
 
 	return mgr;
 }
+
+#ifdef CONFIG_ARM_FFA_TRANSPORT
+static int pool_ffa_op_alloc(struct tee_shm_pool_mgr *poolm,
+			     struct tee_shm *shm, size_t size)
+{
+	return pool_op_alloc_helper(poolm, shm, size, optee_ffa_shm_register);
+}
+
+static void pool_ffa_op_free(struct tee_shm_pool_mgr *poolm,
+			     struct tee_shm *shm)
+{
+	optee_ffa_shm_unregister(shm->ctx, shm);
+	free_pages((unsigned long)shm->kaddr, get_order(shm->size));
+	shm->kaddr = NULL;
+}
+
+static const struct tee_shm_pool_mgr_ops pool_ffa_ops = {
+	.alloc = pool_ffa_op_alloc,
+	.free = pool_ffa_op_free,
+	.destroy_poolmgr = pool_op_destroy_poolmgr,
+};
+
+/**
+ * optee_ffa_shm_pool_alloc_pages() - create page-based allocator pool
+ *
+ * This pool is used with OP-TEE over FF-A. In this case command buffers
+ * and such are allocated from kernel's own memory.
+ */
+struct tee_shm_pool_mgr *optee_ffa_shm_pool_alloc_pages(void)
+{
+	struct tee_shm_pool_mgr *mgr = kzalloc(sizeof(*mgr), GFP_KERNEL);
+
+	if (!mgr)
+		return ERR_PTR(-ENOMEM);
+
+	mgr->ops = &pool_ffa_ops;
+
+	return mgr;
+}
+#endif /*CONFIG_ARM_FFA_TRANSPORT*/
