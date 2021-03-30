@@ -160,6 +160,9 @@
 #define FFA_FEAT_NOTIFICATION_PENDING_INT 0x1
 #define FFA_FEAT_SCHED_RECV_INT 0x2
 
+#define PER_VCPU_NOTIFICATION_FLAG BIT(0)
+#define ALL_NOTIFICATION_BITMAPS_FLAGS 0xF
+
 /* Store Schedule Receiver IRQ ID */
 static u32 ffa_sched_recv_int_id;
 
@@ -202,6 +205,19 @@ static int allocate_vm_struct(ffa_partition_id_t partition_id) {
 	}
 	return -ENOMEM;
 }
+#define MAX_NOTIFICATIONS 64
+struct notification_callback_info {
+	ffa_partition_id_t vm_id;
+	ffa_notification_callback callback;
+	void *dev_data;
+	u32 flags;
+};
+
+struct notification_callbacks {
+	struct notification_callback_info from_vm[MAX_NOTIFICATIONS];
+	struct notification_callback_info from_sp[MAX_NOTIFICATIONS];
+	struct notification_callback_info from_framework[MAX_NOTIFICATIONS];
+} notification_callbacks;
 
 static ffa_fn *invoke_ffa_fn;
 
@@ -239,6 +255,7 @@ struct ffa_drv_info {
 	struct mutex tx_lock; /* lock to protect Tx buffer */
 	void *rx_buffer;
 	void *tx_buffer;
+	struct mutex notifications_lock; /* lock to protect notification binding. */
 };
 
 /* One time array initalisation functions. */
@@ -251,6 +268,31 @@ static void initialise_vm_structs(struct vm *vm, int size)
 		vms[i].sched_recv_callback_data = NULL;
 		rwlock_init(&vms[i].sched_recv_lock);
 	}
+}
+
+/* One time array initalisation functions. */
+static void initialise_notification_callback_struct(struct notification_callback_info *callback_struct,
+						    int size)
+{
+	int i;
+	for (i=0; i < size; i++) {
+		callback_struct[i].callback = NULL;
+		callback_struct[i].vm_id = INVALID_VM_ID;
+	}
+}
+
+/* Helper Function to get corresponding notification callback list. */
+static struct notification_callback_info *get_notification_callbacks(ffa_partition_id_t partition_id)
+{
+	struct notification_callback_info *callbacks;
+
+	if (is_secure_world(partition_id)) {
+		callbacks = notification_callbacks.from_sp;
+	}
+	else {
+		callbacks = notification_callbacks.from_vm;
+	}
+	return callbacks;
 }
 
 static struct ffa_drv_info *drv_info;
@@ -948,6 +990,189 @@ ffa_unregister_schedule_receiver_callback(struct ffa_device *dev)
 	return update_schedule_receiver_callback(dev->vm_id, NULL, NULL, false);
 }
 
+static int
+update_notification_callback(ffa_partition_id_t partition_id, ffa_notification_id_t notification_id,
+			     ffa_notification_callback callback, void *dev_data, bool is_registration)
+{
+	struct notification_callback_info *callbacks = get_notification_callbacks(partition_id);
+	ffa_partition_id_t id = is_registration ? partition_id : INVALID_VM_ID;
+
+	if (notification_id >= MAX_NOTIFICATIONS) {
+		return -EINVAL;
+	}
+
+	if (is_registration) {
+		if (callbacks[notification_id].callback != NULL) {
+			pr_err("Callback already registered for notification id: %d!\n", notification_id);
+			return -EPERM;
+		}
+	}
+	else {
+		if (callbacks[notification_id].vm_id != partition_id) {
+			pr_err("Attempting to relinquish notification for another partition ID!\n");
+			return -EPERM;
+		}
+	}
+
+	callbacks[notification_id].vm_id = id;
+	callbacks[notification_id].callback = callback;
+	callbacks[notification_id].dev_data = dev_data;
+
+	return 0;
+}
+
+static int
+ffa_relinquish_notification(struct ffa_device *dev, ffa_notification_id_t notification_id){
+
+	int rc;
+	u64 bitmap = 0;
+
+	if (notification_id >= MAX_NOTIFICATIONS) {
+		return -EINVAL;
+	}
+
+	mutex_lock(&drv_info->notifications_lock);
+	/* Attempt to unregister callback. */
+	rc = update_notification_callback(dev->vm_id, notification_id, NULL, NULL, false);
+
+	if (rc) {
+		pr_err("Could not unregister notifcation callback\n");
+		mutex_unlock(&drv_info->notifications_lock);
+		return rc;
+	}
+
+	bitmap = 0x1 << notification_id;
+
+	rc = ffa_notification_unbind(dev->vm_id, bitmap);
+
+	mutex_unlock(&drv_info->notifications_lock);
+
+	return rc;
+}
+
+static int
+ffa_request_notification(struct ffa_device *dev, bool is_per_vcpu,
+			 ffa_notification_callback callback, void *dev_data)
+{
+	int i, rc;
+	u32 flags = 0;
+	u64 bitmap = 0;
+	int notification_id = -1;
+	struct notification_callback_info *callbacks = get_notification_callbacks(dev->vm_id);
+
+	mutex_lock(&drv_info->notifications_lock);
+
+	/* Find the first non allocated notification ID */
+	for (i = 0; i < MAX_NOTIFICATIONS; i++) {
+		if (callbacks[i].callback == NULL) {
+			notification_id = i;
+			break;
+		}
+	}
+	if (notification_id < 0) {
+		mutex_unlock(&drv_info->notifications_lock);
+		return -ENOMEM;
+	}
+
+	if (is_per_vcpu) {
+		flags |= PER_VCPU_NOTIFICATION_FLAG;
+	}
+
+	bitmap = (u64) 0x1 << notification_id;
+
+	rc = ffa_notification_bind(dev->vm_id, flags, bitmap);
+
+	mutex_unlock(&drv_info->notifications_lock);
+
+	if (rc) {
+		pr_err("Failed to bind notification: %d\n", rc);
+		return rc;
+	}
+
+	/* Success, store the partition ID and register callback */
+	callbacks[notification_id].flags = flags;
+
+	rc = update_notification_callback(dev->vm_id, notification_id, callback, dev_data, true);
+
+	/* Something went wrong, attempt to relinquish notification ID. */
+	if (rc) {
+		pr_err("Failed to register callback for %d - %d\n", notification_id, rc);
+		ffa_relinquish_notification(dev, notification_id);
+		return -rc;
+	}
+
+	return notification_id;
+}
+
+static void
+handle_notification_bitmap(u64 *bitmap,
+			  struct notification_callback_info *callbacks)
+{
+	int i;
+	for (i = 0; i < MAX_NOTIFICATIONS; i++){
+		if (((u64) 1 << i) & *bitmap){
+			struct notification_callback_info *cb_info = &callbacks[i];
+			if (cb_info->callback == NULL){
+				pr_err("No Handler for Notification %d!; Ignoring\n", i);
+			}
+			else {
+				cb_info->callback(cb_info->vm_id, i, cb_info->dev_data);
+			}
+		}
+	}
+	return;
+}
+
+static void handle_notifications(struct work_struct *unused)
+{
+	int rc;
+	u32 flags = 0;
+	struct ffa_notification_bitmaps bitmaps;
+
+	pr_debug("Handling Notifications on cpu: %d\n", smp_processor_id());
+
+	/* Get all notification bitmaps */
+	flags |= ALL_NOTIFICATION_BITMAPS_FLAGS;
+
+	rc = ffa_notification_get(flags, &bitmaps);
+
+	if (rc) {
+		pr_err("Failed to retreive notifications with %d!\n", rc);
+		return;
+	}
+
+	/* Handle VM and SP Partition Notifications */
+	pr_debug("Handling VM Notifications...\n");
+	handle_notification_bitmap(&bitmaps.vm_notifications,
+			           notification_callbacks.from_vm);
+	pr_debug("Handling SP Notification...\n");
+	handle_notification_bitmap(&bitmaps.sp_notifications,
+			           notification_callbacks.from_sp);
+	pr_debug("Handling Architected Notification...\n");
+	handle_notification_bitmap(&bitmaps.architected_notifications,
+			           notification_callbacks.from_framework);
+
+	return;
+}
+DECLARE_WORK(handle_notifications_work, handle_notifications);
+
+static void handle_self_notification(ffa_partition_id_t partition_id,
+		                    ffa_vcpu_id_t vcpu_target, bool is_per_vcpu, void *callback_data)
+{
+	/* If it is a global notification, schedule the handling on any cpu. */
+	if (!is_per_vcpu) {
+		pr_debug("Scheduleing notification handling from cpu: %d\n", smp_processor_id());
+		schedule_work(&handle_notifications_work);
+	}
+	/* Otherwise ensure the work is scheduled on the target vcpu. */
+	else {
+		pr_debug("Requesting handeling of notification on cpu: %d - from cpu: %d\n",
+			 vcpu_target, smp_processor_id());
+		schedule_work_on(vcpu_target, &handle_notifications_work);
+	}
+	return;
+}
+
 static const struct ffa_dev_ops ffa_ops = {
 	.api_version_get = ffa_api_version_get,
 	.partition_info_get = ffa_partition_info_get,
@@ -957,6 +1182,8 @@ static const struct ffa_dev_ops ffa_ops = {
 	.memory_share = ffa_memory_share,
 	.register_schedule_receiver_callback = ffa_register_schedule_receiver_callback,
 	.unregister_schedule_receiver_callback = ffa_unregister_schedule_receiver_callback,
+	.request_notification = ffa_request_notification,
+	.relinquish_notification = ffa_relinquish_notification,
 };
 
 const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
@@ -1106,6 +1333,14 @@ static int ffa_int_driver_probe(struct platform_device *pdev)
 	/* Enable handler on all cpus. */
 	on_each_cpu(__enable_schedule_receiver_interrupt, NULL, 1);
 	pr_info("FFA Driver registered for ID: %d IRQ: %d\n", sr_intid, irq);
+
+	/* Ensure callbacks are initialised to NULL */
+	initialise_notification_callback_struct(notification_callbacks.from_vm, MAX_NOTIFICATIONS);
+	initialise_notification_callback_struct(notification_callbacks.from_sp, MAX_NOTIFICATIONS);
+	initialise_notification_callback_struct(notification_callbacks.from_framework, MAX_NOTIFICATIONS);
+
+	/* Register internal scheduling callback for handling self targeted notifications. */
+	update_schedule_receiver_callback(drv_info->vm_id, handle_self_notification, NULL, true);
 
 	return 0;
 }

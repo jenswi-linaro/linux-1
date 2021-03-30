@@ -38,8 +38,12 @@ typedef u16 ffa_partition_id_t;
 typedef u16 ffa_vcpu_id_t;
 
 /* Notification Related */
+typedef int ffa_notification_id_t;
+
 typedef void(*ffa_sched_recv_callback)(ffa_partition_id_t partition_id, ffa_vcpu_id_t vcpu,
 				       bool is_per_vcpu, void *callback_data);
+typedef void (*ffa_notification_callback)(ffa_partition_id_t partition_id, ffa_notification_id_t notification_id,
+					  void *callback_data);
 
 /* Store extra information related to a given partition. */
 struct vm {
@@ -289,6 +293,13 @@ struct ffa_dev_ops {
 			void *sched_recv_callback_data);
 	int (*unregister_schedule_receiver_callback)
 			(struct ffa_device *dev);
+	int (*request_notification)
+			(struct ffa_device *dev, bool is_per_vcpu,
+			ffa_notification_callback callback,
+			void *dev_data);
+	int (*relinquish_notification)
+			(struct ffa_device *dev,
+			ffa_notification_id_t notification_id);
 };
 
 #endif /* _LINUX_ARM_FFA_H */
