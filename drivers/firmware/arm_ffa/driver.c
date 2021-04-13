@@ -682,6 +682,21 @@ static int ffa_notification_get(u32 flags, struct ffa_notification_bitmaps *noti
 	return 0;
 }
 
+static int ffa_run(struct ffa_device *dev, ffa_vcpu_id_t vcpu)
+{
+	ffa_value_t ret;
+	u32 target_info = dev->vm_id << 16 | vcpu;
+	invoke_ffa_fn((ffa_value_t){
+		      .a0 = FFA_RUN, .a1 = target_info,
+		      }, &ret);
+	while (ret.a0 == FFA_INTERRUPT)
+		invoke_ffa_fn((ffa_value_t){ .a0 = FFA_RUN, .a1 = ret.a1, }, &ret);
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
+
+	return 0;
+}
+
 static int ffa_msg_send_direct_req(ffa_partition_id_t src_id, ffa_partition_id_t dst_id, bool mode_32bit,
 				   struct ffa_send_direct_data *data)
 {
@@ -1252,6 +1267,7 @@ static const struct ffa_dev_ops ffa_ops = {
 	.request_notification = ffa_request_notification,
 	.relinquish_notification = ffa_relinquish_notification,
 	.send_notification = ffa_send_notification,
+	.run = ffa_run,
 };
 
 const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
