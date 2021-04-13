@@ -300,6 +300,10 @@ struct ffa_dev_ops {
 	int (*relinquish_notification)
 			(struct ffa_device *dev,
 			ffa_notification_id_t notification_id);
+	int (*send_notification)
+			(struct ffa_device *dev,
+			ffa_notification_id_t notification_id, bool is_per_vcpu,
+			ffa_vcpu_id_t vcpu);
 };
 
 #endif /* _LINUX_ARM_FFA_H */

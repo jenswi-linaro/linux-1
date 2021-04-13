@@ -955,6 +955,29 @@ ffa_memory_share(struct ffa_device *dev, struct ffa_mem_ops_args *args)
 	return ffa_memory_ops(FFA_FN_NATIVE(MEM_SHARE), args);
 }
 
+static int
+ffa_send_notification(struct ffa_device *dev, ffa_notification_id_t notification_id,
+		      bool is_per_vcpu, ffa_vcpu_id_t vcpu)
+{
+	u64 bitmap = 0;
+	u32 flags = 0;
+
+
+	/* Set the flags accordinly. */
+	if (is_per_vcpu) {
+		flags |= PER_VCPU_NOTIFICATION_FLAG;
+		flags |= vcpu << 16;
+	}
+	else {
+		/* If we are, ensure vcpu has not also been set. */
+		if (vcpu){
+			return -EINVAL;
+		}
+	}
+
+	bitmap = (u64) 1 << notification_id;
+	return ffa_notification_set(dev->vm_id, drv_info->vm_id, flags, bitmap);
+}
 
 /* Schedule Receiver Registration functions */
 static int
@@ -1228,6 +1251,7 @@ static const struct ffa_dev_ops ffa_ops = {
 	.unregister_schedule_receiver_callback = ffa_unregister_schedule_receiver_callback,
 	.request_notification = ffa_request_notification,
 	.relinquish_notification = ffa_relinquish_notification,
+	.send_notification = ffa_send_notification,
 };
 
 const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
