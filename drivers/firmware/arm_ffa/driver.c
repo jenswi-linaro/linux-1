@@ -315,9 +315,10 @@ static int ffa_msg_send_direct_req(u16 src_id, u16 dst_id, bool mode_32bit,
 		data->data2 = ret.a5;
 		data->data3 = ret.a6;
 		data->data4 = ret.a7;
+		return 0;
 	}
 
-	return 0;
+	return -EINVAL;
 }
 
 static int ffa_mem_first_frag(u32 func_id, phys_addr_t buf, u32 buf_sz,
