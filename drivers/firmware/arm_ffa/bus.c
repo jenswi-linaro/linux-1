@@ -105,11 +105,11 @@ static void ffa_devices_unregister(void)
 bool ffa_device_is_valid(struct ffa_device *ffa_dev)
 {
 	bool valid = false;
-	struct device *dev;
+	struct device *dev = NULL;
 	struct ffa_device *tmp_dev;
 
 	do {
-		dev = bus_find_next_device(&ffa_bus_type, NULL);
+		dev = bus_find_next_device(&ffa_bus_type, dev);
 		tmp_dev = to_ffa_dev(dev);
 		if (tmp_dev == ffa_dev) {
 			valid = true;
