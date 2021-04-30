@@ -85,6 +85,8 @@
 #define FFA_MEM_FRAG_RX			FFA_SMC_32(0x7A)
 #define FFA_MEM_FRAG_TX			FFA_SMC_32(0x7B)
 #define FFA_NORMAL_WORLD_RESUME		FFA_SMC_32(0x7C)
+#define FFA_NOTIFICATION_BITMAP_CREATE	FFA_SMC_32(0x7D)
+#define FFA_NOTIFICATION_BITMAP_DESTROY	FFA_SMC_32(0x7E)
 #define FFA_NOTIFICATION_BIND		FFA_SMC_32(0x7F)
 #define FFA_NOTIFICATION_UNBIND		FFA_SMC_32(0x80)
 #define FFA_NOTIFICATION_SET		FFA_SMC_32(0x81)
@@ -169,6 +171,8 @@
 
 /* Store Schedule Receiver IRQ ID */
 static u32 ffa_sched_recv_int_id;
+
+static bool notification_bitmap_creation_requested = false;
 
 #define SECURE_WORLD_MASK BIT(15)
 
@@ -694,6 +698,30 @@ static int ffa_run(struct ffa_device *dev, ffa_vcpu_id_t vcpu)
 	if (ret.a0 == FFA_ERROR)
 		return ffa_to_linux_errno((int)ret.a2);
 
+	return 0;
+}
+
+static int ffa_notification_bitmap_create(void)
+{
+	ffa_value_t ret;
+	ffa_vcpu_id_t vcpu_count = NR_CPUS;
+	invoke_ffa_fn((ffa_value_t){
+		      .a0 = FFA_NOTIFICATION_BITMAP_CREATE,
+		      .a1 = drv_info->vm_id, .a2 = vcpu_count,
+		      }, &ret);
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
+	return 0;
+}
+
+static int ffa_notification_bitmap_destroy(void)
+{
+	ffa_value_t ret;
+	invoke_ffa_fn((ffa_value_t){
+		      .a0 = FFA_NOTIFICATION_BITMAP_DESTROY, .a1 = drv_info->vm_id,
+		      }, &ret);
+	if (ret.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)ret.a2);
 	return 0;
 }
 
@@ -1430,6 +1458,17 @@ static int ffa_int_driver_probe(struct platform_device *pdev)
 	configure_architected_notification(FFA_SPM_RX_BUFFER_FULL_NOTIFICATION_ID, handle_rx_full_notification);
 	configure_architected_notification(FFA_HYP_RX_BUFFER_FULL_NOTIFICATION_ID, handle_rx_full_notification);
 
+	/* Check whether we need to call NOTIFICATION_BITMAP_CREATE.
+	 * If a hypervisor is present this will be taken care of on the VM's behalf.
+	 * If this calls succeeds then there is no Hypervisor is present and the FF-A
+	 * driver is responsible for requesting the creation and destruction of the notification bitmaps.
+	 */
+	if (!ffa_features(FFA_NOTIFICATION_BITMAP_CREATE, 0)) {
+		pr_debug("No Hypervisor detected; Requesting creation of notification bitmaps\n");
+		ffa_notification_bitmap_create();
+		notification_bitmap_creation_requested = true;
+	}
+
 	return 0;
 }
 
@@ -1526,6 +1565,9 @@ subsys_initcall(ffa_init);
 
 static void __exit ffa_exit(void)
 {
+	if (notification_bitmap_creation_requested) {
+		ffa_notification_bitmap_destroy();
+	}
 	ffa_rxtx_unmap(drv_info->vm_id);
 	free_pages_exact(drv_info->tx_buffer, RXTX_BUFFER_SIZE);
 	free_pages_exact(drv_info->rx_buffer, RXTX_BUFFER_SIZE);
