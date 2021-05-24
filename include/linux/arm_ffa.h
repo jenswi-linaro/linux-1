@@ -71,7 +71,7 @@ static inline void ffa_driver_unregister(struct ffa_driver *driver) {}
 static inline
 bool ffa_device_is_valid(struct ffa_device *ffa_dev) { return false; }
 
-const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
+static inline const struct ffa_dev_ops *ffa_dev_ops_get(struct ffa_device *dev)
 {
 	return NULL;
 }
