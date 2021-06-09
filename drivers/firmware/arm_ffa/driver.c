@@ -52,6 +52,7 @@
 #define FFA_FEATURES			FFA_SMC_32(0x64)
 #define FFA_RX_RELEASE			FFA_SMC_32(0x65)
 #define FFA_RXTX_MAP			FFA_SMC_32(0x66)
+#define FFA_FN64_RXTX_MAP		FFA_SMC_64(0x66)
 #define FFA_RXTX_UNMAP			FFA_SMC_32(0x67)
 #define FFA_PARTITION_INFO_GET		FFA_SMC_32(0x68)
 #define FFA_ID_GET			FFA_SMC_32(0x69)
@@ -206,7 +207,8 @@ static int ffa_rxtx_map(phys_addr_t tx_buf, phys_addr_t rx_buf, u32 pg_cnt)
 {
 	ffa_res_t ret;
 
-	ret = invoke_ffa_fn(FFA_RXTX_MAP, tx_buf, rx_buf, pg_cnt, 0, 0, 0, 0);
+	ret = invoke_ffa_fn(FFA_FN_NATIVE(RXTX_MAP), tx_buf, rx_buf, pg_cnt,
+			    0, 0, 0, 0);
 
 	if (ret.a0 == FFA_ERROR)
 		return ffa_to_linux_errno((int)ret.a2);
