@@ -4,8 +4,10 @@ optee-objs += core.o
 optee-objs += call.o
 optee-objs += rpc.o
 optee-objs += supp.o
-optee-objs += shm_pool.o
 optee-objs += device.o
 
+optee-smc-abi-y = smc_abi.o
+optee-objs += $(optee-smc-abi-y)
+
 # for tracing framework to find optee_trace.h
-CFLAGS_call.o := -I$(src)
+CFLAGS_smc_abi.o := -I$(src)
