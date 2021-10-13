@@ -163,6 +163,10 @@
 #define PER_VCPU_NOTIFICATION_FLAG BIT(0)
 #define ALL_NOTIFICATION_BITMAPS_FLAGS 0xF
 
+/* Define Architected Notifications. */
+#define FFA_SPM_RX_BUFFER_FULL_NOTIFICATION_ID 0
+#define FFA_HYP_RX_BUFFER_FULL_NOTIFICATION_ID 32
+
 /* Store Schedule Receiver IRQ ID */
 static u32 ffa_sched_recv_int_id;
 
@@ -256,6 +260,15 @@ struct ffa_drv_info {
 	void *rx_buffer;
 	void *tx_buffer;
 	struct mutex notifications_lock; /* lock to protect notification binding. */
+};
+
+/* In-direct message header */
+struct message_header {
+	u32 flags;
+	u32 reserved;
+	u32 offset;
+	u32 src_dst;
+	u32 size;
 };
 
 /* One time array initalisation functions. */
@@ -1021,6 +1034,22 @@ update_notification_callback(ffa_partition_id_t partition_id, ffa_notification_i
 	return 0;
 }
 
+static int configure_architected_notification(int notification_id, ffa_notification_callback callback)
+{
+	struct notification_callback_info *notification;
+
+	if (notification_id < 0 || notification_id >= MAX_NOTIFICATIONS)
+		return -EINVAL;
+
+	notification = &notification_callbacks.from_framework[notification_id];
+	if (notification->callback != NULL)
+		return -EPERM;
+
+	notification->callback = callback;
+
+	return 0;
+}
+
 static int
 ffa_relinquish_notification(struct ffa_device *dev, ffa_notification_id_t notification_id){
 
@@ -1171,6 +1200,21 @@ static void handle_self_notification(ffa_partition_id_t partition_id,
 		schedule_work_on(vcpu_target, &handle_notifications_work);
 	}
 	return;
+}
+
+/* Handle the RX buffer full architected notification. */
+static void handle_rx_full_notification(ffa_partition_id_t partition_id,
+					ffa_notification_id_t notification_id, void *dev_data)
+{
+	void *rx_buffer = drv_info->rx_buffer;
+	struct message_header *header = rx_buffer;
+	ffa_partition_id_t sender = SENDER_ID(header->src_dst);
+	char *message =  rx_buffer + header->offset;
+
+	pr_info("Indirect Message Received!\n");
+	pr_info("Sender: 0x%x, Size: %d Flags: 0x%x Body: \"%s\"\n", sender, header->size, header->flags, message);
+
+	ffa_rx_release();
 }
 
 static const struct ffa_dev_ops ffa_ops = {
@@ -1341,6 +1385,10 @@ static int ffa_int_driver_probe(struct platform_device *pdev)
 
 	/* Register internal scheduling callback for handling self targeted notifications. */
 	update_schedule_receiver_callback(drv_info->vm_id, handle_self_notification, NULL, true);
+
+	/* Register internal architected notification handlers for SPM and Hyp. */
+	configure_architected_notification(FFA_SPM_RX_BUFFER_FULL_NOTIFICATION_ID, handle_rx_full_notification);
+	configure_architected_notification(FFA_HYP_RX_BUFFER_FULL_NOTIFICATION_ID, handle_rx_full_notification);
 
 	return 0;
 }
