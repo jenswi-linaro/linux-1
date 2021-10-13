@@ -339,7 +339,7 @@ static int ffa_id_get(u16 *vm_id)
 	return 0;
 }
 
-static int ffa_msg_send_direct_req(u16 src_id, u16 dst_id, bool mode_32bit,
+static int ffa_msg_send_direct_req(ffa_partition_id_t src_id, ffa_partition_id_t dst_id, bool mode_32bit,
 				   struct ffa_send_direct_data *data)
 {
 	u32 req_id, resp_id, src_dst_ids = PACK_TARGET_INFO(src_id, dst_id);
