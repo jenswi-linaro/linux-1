@@ -677,6 +677,26 @@ static void ffa_setup_partitions(void)
 	kfree(pbuf);
 }
 
+
+static int ffa_features(u32 function_id, u32 feature_id)
+{
+	ffa_value_t  id;
+
+	if (feature_id && function_id << 31){
+		pr_err("Invalid Parameters: %x, %x", function_id, feature_id);
+		return ffa_to_linux_errno(-2);
+	}
+
+	invoke_ffa_fn((ffa_value_t){
+              .a0 = FFA_FEATURES, .a1 = function_id, .a2 = feature_id,
+              }, &id);
+
+	if (id.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)id.a2);
+
+	return id.a2;
+}
+
 static int __init ffa_init(void)
 {
 	int ret;
