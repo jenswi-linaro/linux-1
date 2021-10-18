@@ -32,6 +32,10 @@
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
 #include <linux/uuid.h>
+#include <linux/interrupt.h>
+#include <linux/smp.h>
+#include <linux/of_irq.h>
+#include <linux/platform_device.h>
 
 #include "common.h"
 
@@ -131,6 +135,15 @@
  * 64K may be preferred to keep it min a page in 64K PAGE_SIZE config
  */
 #define RXTX_BUFFER_SIZE	SZ_4K
+
+
+/* Notification Prototyping*/
+/* FFA FEATURES Feature IDs*/
+#define FFA_FEAT_NOTIFICATION_PENDING_INT 0x1
+#define FFA_FEAT_SCHED_RECV_INT 0x2
+
+/* Store Schedule Receiver IRQ ID */
+static u32 ffa_sched_recv_int_id;
 
 static ffa_fn *invoke_ffa_fn;
 
@@ -697,6 +710,89 @@ static int ffa_features(u32 function_id, u32 feature_id)
 	return id.a2;
 }
 
+
+/* Handle an SGI */
+static irqreturn_t irq_handler(int irq, void *dev)
+{
+	return IRQ_HANDLED;
+}
+
+
+/* Helper function to register on all CPUS. */
+static void __enable_schedule_receiver_interrupt(void* unused) {
+	enable_percpu_irq(ffa_sched_recv_int_id, IRQ_TYPE_EDGE_RISING);
+	pr_info("Enabled Scheduler Receiver IRQ %d on cpu: %d\n",
+			ffa_sched_recv_int_id, smp_processor_id());
+}
+
+/* Registers for the notification avaliable interrupt. */
+static int ffa_int_driver_probe(struct platform_device *pdev)
+{
+	int sr_intid;
+	int irq;
+	int ret;
+	struct of_phandle_args oirq = {};
+	struct device_node *gic;
+
+	/* Call FFA Features to get ID to be used for Scheduler Receiver */
+	sr_intid = ffa_features(0x0, FFA_FEAT_SCHED_RECV_INT);
+	if (sr_intid < 0) {
+		pr_err("Failed to retrieve Scheduler Receiver Interrupt ID\n");
+		return sr_intid;
+	}
+
+	pr_info("Attempting to register hwID: %d on %d\n", sr_intid, smp_processor_id());
+
+	/* Create Mappings for IRQ */
+	gic = of_irq_find_parent(pdev->dev.of_node);
+	if (!gic)
+		return -ENXIO;
+
+	oirq.np = gic;
+	oirq.args_count = 1;
+	oirq.args[0] = sr_intid;
+	irq = irq_create_of_mapping(&oirq);
+	of_node_put(gic);
+
+	if (!irq) {
+		pr_err("Failed to create mapping!\n");
+		return -ENODATA;
+	}
+
+	/* Store schedule receiver interrupt ID globally*/
+	ffa_sched_recv_int_id = irq;
+
+	pr_info("Attempting to register ID: %d\n", ffa_sched_recv_int_id);
+	ret = request_percpu_irq(ffa_sched_recv_int_id, irq_handler, "ARM-FFA",
+				 pdev);
+
+	if (ret != 0) {
+		pr_err("Error registering notification IRQ %d: %d\n",
+		       sr_intid, ret);
+		return ENODATA;
+	}
+
+	/* Enable handler on all cpus. */
+	on_each_cpu(__enable_schedule_receiver_interrupt, NULL, 1);
+	pr_info("FFA Driver registered for ID: %d IRQ: %d\n", sr_intid, irq);
+
+	return 0;
+}
+
+static const struct of_device_id int_driver_id[] = {
+	{ .compatible = "arm,ffa-1.0" },
+	{},
+};
+
+static struct platform_driver ffa_int_driver = {
+	.driver = {
+		.name = "ffa_protocol",
+		.owner = THIS_MODULE,
+		.of_match_table = int_driver_id,
+	},
+	.probe = ffa_int_driver_probe,
+};
+
 static int __init ffa_init(void)
 {
 	int ret;
@@ -749,6 +845,15 @@ static int __init ffa_init(void)
 	mutex_init(&drv_info->tx_lock);
 
 	ffa_setup_partitions();
+
+	/*
+	 * Register as platform driver so we can register a
+	 * handler for the Scheduler Receiver IRQ.
+	 */
+	ret = platform_driver_register(&ffa_int_driver);
+	if (ret != 0) {
+		pr_err("Error registering as platform driver driver %d\n", ret);
+	}
 
 	return 0;
 free_pages:
