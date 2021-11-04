@@ -671,7 +671,8 @@ static bool optee_ffa_api_is_compatbile(struct ffa_device *ffa_dev,
 
 static bool optee_ffa_exchange_caps(struct ffa_device *ffa_dev,
 				    const struct ffa_dev_ops *ops,
-				    unsigned int *rpc_arg_count)
+				    u32 *sec_caps, unsigned int *rpc_arg_count,
+				    unsigned int *max_notif_value)
 {
 	struct ffa_send_direct_data data = { OPTEE_FFA_EXCHANGE_CAPABILITIES };
 	int rc;
@@ -687,6 +688,11 @@ static bool optee_ffa_exchange_caps(struct ffa_device *ffa_dev,
 	}
 
 	*rpc_arg_count = (u8)data.data1;
+	*sec_caps = data.data2;
+	if (data.data3)
+		*max_notif_value = data.data3;
+	else
+		*max_notif_value = OPTEE_DEFAULT_MAX_NOTIF_VALUE;
 
 	return true;
 }
@@ -716,6 +722,34 @@ static struct tee_shm_pool *optee_ffa_config_dyn_shm(void)
 	}
 
 	return rc;
+}
+
+static void notif_callback(ffa_partition_id_t partition_id,
+			   ffa_notification_id_t val, void *dev_data)
+{
+	struct optee *optee = dev_data;
+
+	if (val == optee->ffa.bottom_half_value)
+		optee_do_bottom_half(optee->notif.ctx);
+	else
+		optee_notif_send(optee, val);
+}
+
+
+static int enable_async_notif(struct optee *optee)
+{
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+	struct ffa_device *ffa_dev = optee->ffa.ffa_dev;
+	struct ffa_send_direct_data data = {
+		.data0 = OPTEE_FFA_ENABLE_ASYNC_NOTIF,
+		.data1 = optee->ffa.bottom_half_value,
+	};
+	int rc;
+
+	rc = ffa_ops->sync_send_receive(ffa_dev, &data);
+	if (rc)
+		return rc;
+	return data.data0;
 }
 
 static void optee_ffa_get_version(struct tee_device *teedev,
@@ -780,6 +814,22 @@ static const struct optee_ops optee_ffa_ops = {
 static void optee_ffa_remove(struct ffa_device *ffa_dev)
 {
 	struct optee *optee = ffa_dev->dev.driver_data;
+	const struct ffa_dev_ops *ffa_ops = optee->ffa.ffa_ops;
+
+	if (optee->ffa.bottom_half_value != U32_MAX)
+		ffa_ops->relinquish_notification(ffa_dev,
+						 optee->ffa.bottom_half_value);
+	if (optee->notif.ctx) {
+		optee_stop_async_notif(optee->notif.ctx);
+		/*
+		 * Note we're not using teedev_close_context() or
+		 * tee_client_close_context() since we have already called
+		 * tee_device_put() while initializing to avoid a circular
+		 * reference counting.
+		 */
+		teedev_close_context(optee->notif.ctx);
+		optee->notif.ctx = NULL;
+	}
 
 	optee_remove_common(optee);
 
@@ -792,9 +842,11 @@ static void optee_ffa_remove(struct ffa_device *ffa_dev)
 static int optee_ffa_probe(struct ffa_device *ffa_dev)
 {
 	const struct ffa_dev_ops *ffa_ops;
+	unsigned int max_notif_value;
 	unsigned int rpc_arg_count;
 	struct tee_device *teedev;
 	struct optee *optee;
+	u32 sec_caps;
 	int rc;
 
 	ffa_ops = ffa_dev_ops_get(ffa_dev);
@@ -806,7 +858,8 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 	if (!optee_ffa_api_is_compatbile(ffa_dev, ffa_ops))
 		return -EINVAL;
 
-	if (!optee_ffa_exchange_caps(ffa_dev, ffa_ops, &rpc_arg_count))
+	if (!optee_ffa_exchange_caps(ffa_dev, ffa_ops, &sec_caps,
+				     &rpc_arg_count, &max_notif_value))
 		return -EINVAL;
 
 	optee = kzalloc(sizeof(*optee), GFP_KERNEL);
@@ -824,6 +877,7 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 	optee->ops = &optee_ffa_ops;
 	optee->ffa.ffa_dev = ffa_dev;
 	optee->ffa.ffa_ops = ffa_ops;
+	optee->ffa.bottom_half_value = U32_MAX;
 	optee->rpc_arg_count = rpc_arg_count;
 
 	teedev = tee_device_alloc(&optee_ffa_clnt_desc, NULL, optee->pool,
@@ -858,10 +912,35 @@ static int optee_ffa_probe(struct ffa_device *ffa_dev)
 	INIT_LIST_HEAD(&optee->call_queue.waiters);
 	optee_supp_init(&optee->supp);
 	ffa_dev_set_drvdata(ffa_dev, optee);
-	rc = optee_notif_init(optee, OPTEE_DEFAULT_MAX_NOTIF_VALUE);
+	rc = optee_notif_init(optee, max_notif_value);
 	if (rc) {
 		optee_ffa_remove(ffa_dev);
 		return rc;
+	}
+	if (sec_caps & OPTEE_FFA_SEC_CAP_ASYNC_NOTIF) {
+		bool is_per_vcpu = false;
+		struct tee_context *ctx;
+
+		ctx = teedev_open(optee->teedev);
+		if (IS_ERR(ctx)) {
+			optee_ffa_remove(ffa_dev);
+			return PTR_ERR(ctx);
+		}
+		optee->notif.ctx  = ctx;
+
+		rc = ffa_ops->request_notification(ffa_dev, is_per_vcpu,
+						   notif_callback, optee);
+		if (rc < 0) {
+			optee_ffa_remove(ffa_dev);
+			return rc;
+		}
+		optee->ffa.bottom_half_value = rc;
+
+		rc = enable_async_notif(optee);
+		if (rc) {
+			optee_ffa_remove(ffa_dev);
+			return rc;
+		}
 	}
 
 	rc = optee_enumerate_devices(PTA_CMD_GET_DEVICES);

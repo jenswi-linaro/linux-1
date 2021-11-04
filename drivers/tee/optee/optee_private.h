@@ -103,6 +103,7 @@ struct optee_smc {
 struct optee_ffa {
 	struct ffa_device *ffa_dev;
 	const struct ffa_dev_ops *ffa_ops;
+	u32 bottom_half_value;
 	/* Serializes access to @global_ids */
 	struct mutex mutex;
 	struct rhashtable global_ids;
