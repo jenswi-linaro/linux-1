@@ -879,32 +879,6 @@ static int optee_smc_do_call_with_arg(struct tee_context *ctx,
 	return rc;
 }
 
-static int simple_call_with_arg(struct tee_context *ctx, u32 cmd)
-{
-	struct optee_msg_arg *msg_arg;
-	struct tee_shm *shm;
-
-	shm = optee_get_msg_arg(ctx, 0, &msg_arg);
-	if (IS_ERR(shm))
-		return PTR_ERR(shm);
-
-	msg_arg->cmd = cmd;
-	optee_smc_do_call_with_arg(ctx, shm);
-
-	tee_shm_free(shm);
-	return 0;
-}
-
-static int optee_smc_do_bottom_half(struct tee_context *ctx)
-{
-	return simple_call_with_arg(ctx, OPTEE_MSG_CMD_DO_BOTTOM_HALF);
-}
-
-static int optee_smc_stop_async_notif(struct tee_context *ctx)
-{
-	return simple_call_with_arg(ctx, OPTEE_MSG_CMD_STOP_ASYNC_NOTIF);
-}
-
 /*
  * 5. Asynchronous notification
  */
@@ -952,7 +926,7 @@ static irqreturn_t notif_irq_thread_fn(int irq, void *dev_id)
 {
 	struct optee *optee = dev_id;
 
-	optee_smc_do_bottom_half(optee->notif.ctx);
+	optee_do_bottom_half(optee->notif.ctx);
 
 	return IRQ_HANDLED;
 }
@@ -987,7 +961,7 @@ err_close_ctx:
 static void optee_smc_notif_uninit_irq(struct optee *optee)
 {
 	if (optee->notif.ctx) {
-		optee_smc_stop_async_notif(optee->notif.ctx);
+		optee_stop_async_notif(optee->notif.ctx);
 		if (optee->smc.notif_irq) {
 			free_irq(optee->smc.notif_irq, optee);
 			irq_dispose_mapping(optee->smc.notif_irq);
