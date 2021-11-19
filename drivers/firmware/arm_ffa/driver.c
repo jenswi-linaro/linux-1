@@ -1531,6 +1531,7 @@ static int __init ffa_init(void)
 	mutex_init(&drv_info->tx_lock);
 
 	initialise_vm_structs(vms, MAX_PARTITIONS);
+	allocate_vm_struct(drv_info->vm_id);
 
 	ffa_setup_partitions();
 
