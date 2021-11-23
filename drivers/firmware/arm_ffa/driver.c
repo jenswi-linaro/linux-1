@@ -1360,23 +1360,16 @@ static void ffa_setup_partitions(void)
 }
 
 
-static int ffa_features(u32 function_id, u32 feature_id)
+static int ffa_features(u32 id)
 {
-	ffa_value_t  id;
+	ffa_value_t  res;
 
-	if (feature_id && function_id << 31){
-		pr_err("Invalid Parameters: %x, %x", function_id, feature_id);
-		return ffa_to_linux_errno(-2);
-	}
+	invoke_ffa_fn((ffa_value_t){ .a0 = FFA_FEATURES, .a1 = id, }, &res);
 
-	invoke_ffa_fn((ffa_value_t){
-              .a0 = FFA_FEATURES, .a1 = function_id, .a2 = feature_id,
-              }, &id);
+	if (res.a0 == FFA_ERROR)
+		return ffa_to_linux_errno((int)res.a2);
 
-	if (id.a0 == FFA_ERROR)
-		return ffa_to_linux_errno((int)id.a2);
-
-	return id.a2;
+	return res.a2;
 }
 
 
@@ -1405,7 +1398,7 @@ static int ffa_int_driver_probe(struct platform_device *pdev)
 	struct device_node *gic;
 
 	/* Call FFA Features to get ID to be used for Scheduler Receiver */
-	sr_intid = ffa_features(0x0, FFA_FEAT_SCHED_RECV_INT);
+	sr_intid = ffa_features(FFA_FEAT_SCHED_RECV_INT);
 	if (sr_intid < 0) {
 		pr_err("Failed to retrieve Scheduler Receiver Interrupt ID\n");
 		return sr_intid;
@@ -1463,7 +1456,7 @@ static int ffa_int_driver_probe(struct platform_device *pdev)
 	 * If this calls succeeds then there is no Hypervisor is present and the FF-A
 	 * driver is responsible for requesting the creation and destruction of the notification bitmaps.
 	 */
-	if (!ffa_features(FFA_NOTIFICATION_BITMAP_CREATE, 0)) {
+	if (!ffa_features(FFA_NOTIFICATION_BITMAP_CREATE)) {
 		pr_debug("No Hypervisor detected; Requesting creation of notification bitmaps\n");
 		ffa_notification_bitmap_create();
 		notification_bitmap_creation_requested = true;
