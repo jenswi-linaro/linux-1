@@ -172,6 +172,7 @@ void optee_remove_common(struct optee *optee)
 
 	optee_notif_uninit(optee);
 	teedev_close_context(optee->ctx);
+	optee_shm_arg_cache_uninit(optee);
 	/*
 	 * The two devices have to be unregistered before we can free the
 	 * other resources.
