@@ -16,3 +16,13 @@ config RPMB_INTF_DEV
 	help
 	  Say yes here if you want to access RPMB from user space
 	  via character device interface /dev/rpmb%d
+
+config VIRTIO_RPMB
+	tristate "Virtio RPMB driver"
+	default n
+	depends on VIRTIO
+	select RPMB
+	help
+	  Say yes here if you have a Virtio aware RPMB device or want to use
+          RPMB from a Virtual Machine images.
+	  This device interface is only for guest/frontend virtio driver.
