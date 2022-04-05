@@ -18628,6 +18628,7 @@ S:	Supported
 F:	drivers/rpmb/*
 F:	include/uapi/linux/rpmb.h
 F:	include/linux/rpmb.h
+F:	tools/rpmb/
 
 RPMSG TTY DRIVER
 M:	Arnaud Pouliquen <arnaud.pouliquen@foss.st.com>
