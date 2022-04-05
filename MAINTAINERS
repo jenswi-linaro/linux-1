@@ -18626,6 +18626,7 @@ M:	?
 L:	linux-kernel@vger.kernel.org
 S:	Supported
 F:	drivers/rpmb/*
+F:	include/uapi/linux/rpmb.h
 F:	include/linux/rpmb.h
 
 RPMSG TTY DRIVER

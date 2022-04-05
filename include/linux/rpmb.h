@@ -8,7 +8,11 @@
 
 #include <linux/types.h>
 #include <linux/device.h>
+#include <linux/cdev.h>
+#include <uapi/linux/rpmb.h>
 #include <linux/kref.h>
+
+#define RPMB_API_VERSION 0x80000001
 
 /**
  * struct rpmb_ops - RPMB ops to be implemented by underlying block device
@@ -54,6 +58,8 @@ struct rpmb_ops {
  * @dev        : device
  * @id         : device id
  * @target     : RPMB target/region within the physical device
+ * @cdev       : character dev
+ * @status     : device status
  * @ops        : operation exported by rpmb
  */
 struct rpmb_dev {
@@ -61,6 +67,10 @@ struct rpmb_dev {
 	struct device dev;
 	int id;
 	u8 target;
+#ifdef CONFIG_RPMB_INTF_DEV
+	struct cdev cdev;
+	unsigned long status;
+#endif /* CONFIG_RPMB_INTF_DEV */
 	const struct rpmb_ops *ops;
 };
 
