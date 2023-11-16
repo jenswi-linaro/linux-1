@@ -212,7 +212,6 @@ static void rpmb_dev_release(struct device *dev)
 
 struct class rpmb_class = {
 	.name = "rpmb",
-	.owner = THIS_MODULE,
 	.dev_release = rpmb_dev_release,
 };
 EXPORT_SYMBOL(rpmb_class);
