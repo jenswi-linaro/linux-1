@@ -1306,17 +1306,28 @@ static void ffa_sched_recv_irq_work_fn(struct work_struct *work)
 	ffa_notification_info_get();
 }
 
+static int ffa_get_notif_intid(int *intid)
+{
+	int ret;
+
+	ret = ffa_features(FFA_FEAT_SCHEDULE_RECEIVER_INT, 0, intid, NULL);
+	if (!ret)
+		return 0;
+	ret = ffa_features(FFA_FEAT_NOTIFICATION_PENDING_INT, 0, intid, NULL);
+	if (!ret)
+		return 0;
+
+	pr_err("Failed to retrieve one of scheduler Rx or notif pending interrupts\n");
+	return ret;
+}
+
 static int ffa_sched_recv_irq_map(void)
 {
-	int ret, irq, sr_intid;
+	int ret, irq, intid;
 
-	/* The returned sr_intid is assumed to be SGI donated to NS world */
-	ret = ffa_features(FFA_FEAT_SCHEDULE_RECEIVER_INT, 0, &sr_intid, NULL);
-	if (ret < 0) {
-		if (ret != -EOPNOTSUPP)
-			pr_err("Failed to retrieve scheduler Rx interrupt\n");
+	ret = ffa_get_notif_intid(&intid);
+	if (ret)
 		return ret;
-	}
 
 	if (acpi_disabled) {
 		struct of_phandle_args oirq = {};
@@ -1329,12 +1340,12 @@ static int ffa_sched_recv_irq_map(void)
 
 		oirq.np = gic;
 		oirq.args_count = 1;
-		oirq.args[0] = sr_intid;
+		oirq.args[0] = intid;
 		irq = irq_create_of_mapping(&oirq);
 		of_node_put(gic);
 #ifdef CONFIG_ACPI
 	} else {
-		irq = acpi_register_gsi(NULL, sr_intid, ACPI_EDGE_SENSITIVE,
+		irq = acpi_register_gsi(NULL, intid, ACPI_EDGE_SENSITIVE,
 					ACPI_ACTIVE_HIGH);
 #endif
 	}
@@ -1442,17 +1453,15 @@ static void ffa_notifications_setup(void)
 	int ret, irq;
 
 	ret = ffa_features(FFA_NOTIFICATION_BITMAP_CREATE, 0, NULL, NULL);
-	if (ret) {
-		pr_info("Notifications not supported, continuing with it ..\n");
-		return;
-	}
+	if (!ret) {
 
-	ret = ffa_notification_bitmap_create();
-	if (ret) {
-		pr_info("Notification bitmap create error %d\n", ret);
-		return;
+		ret = ffa_notification_bitmap_create();
+		if (ret) {
+			pr_err("notification_bitmap_create error %d\n", ret);
+			return;
+		}
+		drv_info->bitmap_created = true;
 	}
-	drv_info->bitmap_created = true;
 
 	irq = ffa_sched_recv_irq_map();
 	if (irq <= 0) {
