@@ -13,6 +13,9 @@ struct restricted_buffer {
 	size_t			size;
 
 	struct sg_table		sg_table;
+
+	/* A reference to a buffer in the trusted or secure world. */
+	u64			restricted_addr;
 };
 
 struct restricted_heap {
