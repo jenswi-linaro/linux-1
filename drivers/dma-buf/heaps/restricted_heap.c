@@ -151,10 +151,21 @@ restricted_heap_allocate(struct dma_heap *heap, unsigned long size,
 			 unsigned long fd_flags, unsigned long heap_flags)
 {
 	struct restricted_heap *rheap = dma_heap_get_drvdata(heap);
+	const struct restricted_heap_ops *ops = rheap->ops;
 	struct restricted_buffer *restricted_buf;
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 	struct dma_buf *dmabuf;
 	int ret;
+
+	/*
+	 * In some implements, TEE is required to protect buffer. However TEE probe
+	 * may be late, Thus heap_init is performed when the first buffer is requested.
+	 */
+	if (ops->heap_init) {
+		ret = ops->heap_init(rheap);
+		if (ret)
+			return ERR_PTR(ret);
+	}
 
 	restricted_buf = kzalloc(sizeof(*restricted_buf), GFP_KERNEL);
 	if (!restricted_buf)
