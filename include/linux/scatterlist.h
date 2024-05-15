@@ -282,6 +282,7 @@ static inline void sg_unmark_end(struct scatterlist *sg)
 
 #define SG_DMA_BUS_ADDRESS	(1 << 0)
 #define SG_DMA_SWIOTLB		(1 << 1)
+#define SG_DMA_RESTRICTED	(2 << 1)
 
 /**
  * sg_dma_is_bus_address - Return whether a given segment was marked
@@ -352,6 +353,31 @@ static inline void sg_dma_mark_swiotlb(struct scatterlist *sg)
 	sg->dma_flags |= SG_DMA_SWIOTLB;
 }
 
+/**
+ * sg_dma_mark_restricted - Mark the scatterlist for restricted buffer.
+ * @sg:		SG entry
+ *
+ * Description:
+ *   Marks a a scatterlist for the restricted buffer that may be inaccessiable
+ *   in kernel if it is protected.
+ */
+static inline void sg_dma_mark_restricted(struct scatterlist *sg)
+{
+	sg->dma_flags |= SG_DMA_RESTRICTED;
+}
+
+/**
+ * sg_dma_is_restricted - Return whether the scatterlist was marked as restricted
+ *                        buffer.
+ * @sg:		SG entry
+ *
+ * Description:
+ *   Returns true if the scatterlist was marked as restricted buffer.
+ */
+static inline bool sg_dma_is_restricted(struct scatterlist *sg)
+{
+	return sg->dma_flags & SG_DMA_RESTRICTED;
+}
 #else
 
 static inline bool sg_dma_is_bus_address(struct scatterlist *sg)
@@ -372,6 +398,14 @@ static inline void sg_dma_mark_swiotlb(struct scatterlist *sg)
 {
 }
 
+static inline bool sg_dma_is_restricted(struct scatterlist *sg)
+{
+	return false;
+}
+
+static inline void sg_dma_mark_restrited(struct scatterlist *sg)
+{
+}
 #endif	/* CONFIG_NEED_SG_DMA_FLAGS */
 
 /**
