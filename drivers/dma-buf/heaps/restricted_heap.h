@@ -11,6 +11,8 @@
 struct restricted_buffer {
 	struct dma_heap		*heap;
 	size_t			size;
+
+	struct sg_table		sg_table;
 };
 
 struct restricted_heap {
