@@ -12,10 +12,8 @@
 #include <linux/rpmb.h>
 #include <linux/slab.h>
 
-static struct list_head rpmb_dev_list;
+static DEFINE_IDA(rpmb_ida);
 static DEFINE_MUTEX(rpmb_mutex);
-static struct blocking_notifier_head rpmb_interface =
-	BLOCKING_NOTIFIER_INIT(rpmb_interface);
 
 /**
  * rpmb_dev_get() - increase rpmb device ref counter
@@ -24,7 +22,7 @@ static struct blocking_notifier_head rpmb_interface =
 struct rpmb_dev *rpmb_dev_get(struct rpmb_dev *rdev)
 {
 	if (rdev)
-		get_device(rdev->parent_dev);
+		get_device(&rdev->dev);
 	return rdev;
 }
 EXPORT_SYMBOL_GPL(rpmb_dev_get);
@@ -36,7 +34,7 @@ EXPORT_SYMBOL_GPL(rpmb_dev_get);
 void rpmb_dev_put(struct rpmb_dev *rdev)
 {
 	if (rdev)
-		put_device(rdev->parent_dev);
+		put_device(&rdev->dev);
 }
 EXPORT_SYMBOL_GPL(rpmb_dev_put);
 
@@ -56,10 +54,26 @@ int rpmb_route_frames(struct rpmb_dev *rdev, u8 *req,
 	if (!req || !req_len || !rsp || !rsp_len)
 		return -EINVAL;
 
-	return rdev->descr.route_frames(rdev->parent_dev, req, req_len,
+	return rdev->descr.route_frames(rdev->dev.parent, req, req_len,
 					rsp, rsp_len);
 }
 EXPORT_SYMBOL_GPL(rpmb_route_frames);
+
+static void rpmb_dev_release(struct device *dev)
+{
+	struct rpmb_dev *rdev = to_rpmb_dev(dev);
+
+	mutex_lock(&rpmb_mutex);
+	ida_simple_remove(&rpmb_ida, rdev->id);
+	mutex_unlock(&rpmb_mutex);
+	kfree(rdev->descr.dev_id);
+	kfree(rdev);
+}
+
+static struct class rpmb_class = {
+	.name = "rpmb",
+	.dev_release = rpmb_dev_release,
+};
 
 /**
  * rpmb_dev_find_device() - return first matching rpmb device
@@ -79,34 +93,33 @@ EXPORT_SYMBOL_GPL(rpmb_route_frames);
  */
 struct rpmb_dev *rpmb_dev_find_device(const void *data,
 				      const struct rpmb_dev *start,
-				      int (*match)(struct rpmb_dev *rdev,
+				      int (*match)(struct device *dev,
 						   const void *data))
 {
-	struct rpmb_dev *rdev;
-	struct list_head *pos;
+	struct device *dev;
+	const struct device *start_dev = NULL;
 
-	mutex_lock(&rpmb_mutex);
 	if (start)
-		pos = start->list_node.next;
-	else
-		pos = rpmb_dev_list.next;
+		start_dev = &start->dev;
+	dev = class_find_device(&rpmb_class, start_dev, data, match);
 
-	while (pos != &rpmb_dev_list) {
-		rdev = container_of(pos, struct rpmb_dev, list_node);
-		if (match(rdev, data)) {
-			rpmb_dev_get(rdev);
-			goto out;
-		}
-		pos = pos->next;
-	}
-	rdev = NULL;
-
-out:
-	mutex_unlock(&rpmb_mutex);
-
-	return rdev;
+	return dev ? to_rpmb_dev(dev) : NULL;
 }
 EXPORT_SYMBOL_GPL(rpmb_dev_find_device);
+
+int rpmb_interface_register(struct class_interface *intf)
+{
+	intf->class = &rpmb_class;
+
+	return class_interface_register(intf);
+}
+EXPORT_SYMBOL_GPL(rpmb_interface_register);
+
+void rpmb_interface_unregister(struct class_interface *intf)
+{
+	class_interface_unregister(intf);
+}
+EXPORT_SYMBOL_GPL(rpmb_interface_unregister);
 
 /**
  * rpmb_dev_unregister() - unregister RPMB partition from the RPMB subsystem
@@ -122,11 +135,9 @@ int rpmb_dev_unregister(struct rpmb_dev *rdev)
 	if (!rdev)
 		return -EINVAL;
 
-	mutex_lock(&rpmb_mutex);
-	list_del(&rdev->list_node);
-	mutex_unlock(&rpmb_mutex);
-	kfree(rdev->descr.dev_id);
-	kfree(rdev);
+	device_del(&rdev->dev);
+
+	rpmb_dev_put(rdev);
 
 	return 0;
 }
@@ -146,6 +157,7 @@ struct rpmb_dev *rpmb_dev_register(struct device *dev,
 				   struct rpmb_descr *descr)
 {
 	struct rpmb_dev *rdev;
+	int ret;
 
 	if (!dev || !descr || !descr->route_frames || !descr->dev_id ||
 	    !descr->dev_id_len)
@@ -158,71 +170,58 @@ struct rpmb_dev *rpmb_dev_register(struct device *dev,
 	rdev->descr.dev_id = kmemdup(descr->dev_id, descr->dev_id_len,
 				     GFP_KERNEL);
 	if (!rdev->descr.dev_id) {
-		kfree(rdev);
-		return ERR_PTR(-ENOMEM);
+		ret = -ENOMEM;
+		goto err_free_rdev;
 	}
 
-	rdev->parent_dev = dev;
-
-	dev_dbg(rdev->parent_dev, "registered device\n");
-
 	mutex_lock(&rpmb_mutex);
-	list_add_tail(&rdev->list_node, &rpmb_dev_list);
-	blocking_notifier_call_chain(&rpmb_interface, RPMB_NOTIFY_ADD_DEVICE,
-				     rdev);
+	ret = ida_simple_get(&rpmb_ida, 0, 0, GFP_KERNEL);
 	mutex_unlock(&rpmb_mutex);
+	if (ret < 0)
+		goto err_free_dev_id;
+	rdev->id = ret;
+
+	dev_set_name(&rdev->dev, "rpmb%d", rdev->id);
+	rdev->dev.class = &rpmb_class;
+	rdev->dev.parent = dev;
+
+	ret = device_register(&rdev->dev);
+	if (ret)
+		goto err_id_remove;
+
+	dev_dbg(&rdev->dev, "registered device\n");
 
 	return rdev;
+
+err_id_remove:
+	mutex_lock(&rpmb_mutex);
+	ida_simple_remove(&rpmb_ida, rdev->id);
+	mutex_unlock(&rpmb_mutex);
+err_free_dev_id:
+	kfree(rdev->descr.dev_id);
+err_free_rdev:
+	kfree(rdev);
+	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(rpmb_dev_register);
 
-/**
- * rpmb_interface_register() - register for new device notifications
- *
- * @nb : New entry in notifier chain
- *
- * Returns: 0 on success  -EEXIST on error.
- */
-int rpmb_interface_register(struct notifier_block *nb)
-{
-	struct rpmb_dev *rdev;
-	int ret;
-
-	ret = blocking_notifier_chain_register(&rpmb_interface, nb);
-	if (ret)
-		return ret;
-
-	mutex_lock(&rpmb_mutex);
-	list_for_each_entry(rdev, &rpmb_dev_list, list_node)
-		nb->notifier_call(nb, RPMB_NOTIFY_ADD_DEVICE, rdev);
-	mutex_unlock(&rpmb_mutex);
-
-	return 0;
-}
-EXPORT_SYMBOL_GPL(rpmb_interface_register);
-
-/**
- * rpmb_interface_unregister() - unregister from new device notifications
- *
- * @nb : Entry to remove from notifier chain
- *
- * Returns: 0 on success or -ENOENT on failure.
- */
-int rpmb_interface_unregister(struct notifier_block *nb)
-{
-	return blocking_notifier_chain_unregister(&rpmb_interface, nb);
-}
-EXPORT_SYMBOL_GPL(rpmb_interface_unregister);
-
 static int __init rpmb_init(void)
 {
-	INIT_LIST_HEAD(&rpmb_dev_list);
+	int ret;
+
+	ret = class_register(&rpmb_class);
+	if (ret) {
+		pr_err("couldn't create class\n");
+		return ret;
+	}
+	ida_init(&rpmb_ida);
 	return 0;
 }
 
 static void __exit rpmb_exit(void)
 {
-	mutex_destroy(&rpmb_mutex);
+	ida_destroy(&rpmb_ida);
+	class_unregister(&rpmb_class);
 }
 
 subsys_initcall(rpmb_init);
