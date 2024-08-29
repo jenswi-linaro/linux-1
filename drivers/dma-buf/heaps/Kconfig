@@ -28,3 +28,13 @@ config DMABUF_HEAPS_RESTRICTED_MTK
 	help
 	  Enable restricted dma-buf heaps for MediaTek platform. This heap is backed by
 	  TEE client interfaces. If in doubt, say N.
+
+config DMABUF_HEAPS_RESTRICTED_LINARO
+	bool "Linaro DMA-BUF Restricted Heap"
+	depends on DMABUF_HEAPS_RESTRICTED
+	help
+	  Choose this option to enable the Linaro restricted dma-buf heap.
+	  The restricted heap pools are defined according to the DT. Heaps
+	  are allocated in the pools using gen allocater.
+	  If in doubt, say N.
+
