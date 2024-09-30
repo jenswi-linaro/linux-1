@@ -175,6 +175,15 @@ static inline size_t tee_shm_get_page_offset(struct tee_shm *shm)
 }
 
 /**
+ * tee_rstmem_gen_pool_alloc() - Create a restricted memory manager
+ * @paddr:	Physical address of start of pool
+ * @size:	Size in bytes of the pool
+ *
+ * @returns pointer to a 'struct tee_shm_pool' or an ERR_PTR on failure.
+ */
+struct tee_shm_pool *tee_rstmem_gen_pool_alloc(phys_addr_t paddr, size_t size);
+
+/**
  * tee_client_open_context() - Open a TEE context
  * @start:	if not NULL, continue search after this context
  * @match:	function to check TEE device
