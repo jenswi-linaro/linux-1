@@ -235,6 +235,39 @@ struct optee_smc_get_shm_config_result {
 };
 
 /*
+ * Get Secure Data Path memory config
+ *
+ * Returns the Secure Data Path memory config.
+ *
+ * Call register usage:
+ * a0   SMC Function ID, OPTEE_SMC_GET_SDP_CONFIG
+ * a2-6 Not used, must be zero
+ * a7   Hypervisor Client ID register
+ *
+ * Have config return register usage:
+ * a0   OPTEE_SMC_RETURN_OK
+ * a1   Physical address of start of SDP memory
+ * a2   Size of SDP memory
+ * a3   Not used
+ * a4-7 Preserved
+ *
+ * Not available register usage:
+ * a0   OPTEE_SMC_RETURN_ENOTAVAIL
+ * a1-3 Not used
+ * a4-7 Preserved
+ */
+#define OPTEE_SMC_FUNCID_GET_SDP_CONFIG	20
+#define OPTEE_SMC_GET_SDP_CONFIG \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_SDP_CONFIG)
+
+struct optee_smc_get_sdp_config_result {
+	unsigned long status;
+	unsigned long start;
+	unsigned long size;
+	unsigned long flags;
+};
+
+/*
  * Exchanges capabilities between normal world and secure world
  *
  * Call register usage:
@@ -278,6 +311,8 @@ struct optee_smc_get_shm_config_result {
 #define OPTEE_SMC_SEC_CAP_ASYNC_NOTIF		BIT(5)
 /* Secure world supports pre-allocating RPC arg struct */
 #define OPTEE_SMC_SEC_CAP_RPC_ARG		BIT(6)
+/* Secure world supports Secure Data Path */
+#define OPTEE_SMC_SEC_CAP_SDP			BIT(7)
 
 #define OPTEE_SMC_FUNCID_EXCHANGE_CAPABILITIES	9
 #define OPTEE_SMC_EXCHANGE_CAPABILITIES \

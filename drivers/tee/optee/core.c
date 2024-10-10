@@ -95,6 +95,25 @@ void optee_release_supp(struct tee_context *ctx)
 	optee_supp_release(&optee->supp);
 }
 
+int optee_rstmem_alloc(struct tee_context *ctx, struct tee_shm *shm,
+		       u32 flags, size_t size)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	if (!optee->sdp_pool)
+		return -EINVAL;
+	if (flags != TEE_IOC_FLAG_SECURE_VIDEO)
+		return -EINVAL;
+	return optee->sdp_pool->ops->alloc(optee->sdp_pool, shm, size, 0);
+}
+
+void optee_rstmem_free(struct tee_context *ctx, struct tee_shm *shm)
+{
+	struct optee *optee = tee_get_drvdata(ctx->teedev);
+
+	optee->sdp_pool->ops->free(optee->sdp_pool, shm);
+}
+
 void optee_remove_common(struct optee *optee)
 {
 	/* Unregister OP-TEE specific client devices on TEE bus */
@@ -111,6 +130,8 @@ void optee_remove_common(struct optee *optee)
 	tee_device_unregister(optee->teedev);
 
 	tee_shm_pool_free(optee->pool);
+	if (optee->sdp_pool)
+		optee->sdp_pool->ops->destroy_pool(optee->sdp_pool);
 	optee_supp_uninit(&optee->supp);
 	mutex_destroy(&optee->call_queue.mutex);
 }
