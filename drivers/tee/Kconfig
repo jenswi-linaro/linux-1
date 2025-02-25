@@ -11,6 +11,11 @@ menuconfig TEE
 	  This implements a generic interface towards a Trusted Execution
 	  Environment (TEE).
 
+config TEE_DMABUF_HEAP
+	bool
+	depends on TEE = y && DMABUF_HEAPS
+	default y
+
 if TEE
 
 source "drivers/tee/optee/Kconfig"
