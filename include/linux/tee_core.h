@@ -8,9 +8,11 @@
 
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/dma-buf.h>
 #include <linux/idr.h>
 #include <linux/kref.h>
 #include <linux/list.h>
+#include <linux/scatterlist.h>
 #include <linux/tee.h>
 #include <linux/tee_drv.h>
 #include <linux/types.h>
@@ -29,6 +31,12 @@
 
 #define TEE_DEVICE_FLAG_REGISTERED	0x1
 #define TEE_MAX_DEV_NAME_LEN		32
+
+enum tee_dma_heap_id {
+	TEE_DMA_HEAP_SECURE_VIDEO_PLAY = 1,
+	TEE_DMA_HEAP_TRUSTED_UI,
+	TEE_DMA_HEAP_SECURE_VIDEO_RECORD,
+};
 
 /**
  * struct tee_device - TEE Device representation
@@ -117,6 +125,33 @@ struct tee_desc {
 };
 
 /**
+ * struct tee_rstmem_pool - restricted memory pool
+ * @ops:		operations
+ *
+ * This is an abstract interface where this struct is expected to be
+ * embedded in another struct specific to the implementation.
+ */
+struct tee_rstmem_pool {
+	const struct tee_rstmem_pool_ops *ops;
+};
+
+/**
+ * struct tee_rstmem_pool_ops - restricted memory pool operations
+ * @alloc:		called when allocating restricted memory
+ * @free:		called when freeing restricted memory
+ * @destroy_pool:	called when destroying the pool
+ */
+struct tee_rstmem_pool_ops {
+	int (*alloc)(struct tee_rstmem_pool *pool, struct sg_table *sgt,
+		     size_t size, size_t *offs);
+	void (*free)(struct tee_rstmem_pool *pool, struct sg_table *sgt);
+	int (*update_shm)(struct tee_rstmem_pool *pool, struct sg_table *sgt,
+			  size_t offs, struct tee_shm *shm,
+			  struct tee_shm **parent_shm);
+	void (*destroy_pool)(struct tee_rstmem_pool *pool);
+};
+
+/**
  * tee_device_alloc() - Allocate a new struct tee_device instance
  * @teedesc:	Descriptor for this driver
  * @dev:	Parent device for this device
@@ -153,6 +188,11 @@ int tee_device_register(struct tee_device *teedev);
  * @teedev is NULL.
  */
 void tee_device_unregister(struct tee_device *teedev);
+
+int tee_device_register_dma_heap(struct tee_device *teedev,
+				 enum tee_dma_heap_id id,
+				 struct tee_rstmem_pool *pool);
+void tee_device_unregister_all_dma_heaps(struct tee_device *teedev);
 
 /**
  * tee_device_set_dev_groups() - Set device attribute groups
@@ -225,6 +265,28 @@ struct tee_shm_pool *tee_shm_pool_alloc_res_mem(unsigned long vaddr,
  * this function is called.
  */
 static inline void tee_shm_pool_free(struct tee_shm_pool *pool)
+{
+	pool->ops->destroy_pool(pool);
+}
+
+/**
+ * tee_rstmem_static_pool_alloc() - Create a restricted memory manager
+ * @paddr:	Physical address of start of pool
+ * @size:	Size in bytes of the pool
+ *
+ * @returns pointer to a 'struct tee_shm_pool' or an ERR_PTR on failure.
+ */
+struct tee_rstmem_pool *tee_rstmem_static_pool_alloc(phys_addr_t paddr,
+						     size_t size);
+
+/**
+ * tee_rstmem_pool_free() - Free a restricted memory pool
+ * @pool:	The restricted memory pool to free
+ *
+ * There must be no remaining restricted memory allocated from this pool
+ * when this function is called.
+ */
+static inline void tee_rstmem_pool_free(struct tee_rstmem_pool *pool)
 {
 	pool->ops->destroy_pool(pool);
 }
