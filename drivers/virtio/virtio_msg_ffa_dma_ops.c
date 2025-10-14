@@ -83,6 +83,7 @@ static dma_addr_t virtio_msg_dma_map_page(struct device *dev, struct page *page,
 					 unsigned long attrs)
 {
 	size_t n_pages = PFN_UP(offset + size);
+	unsigned long dma_offset;
 	dma_addr_t dma_handle;
 
 	if (WARN_ON(dir == DMA_NONE))
@@ -95,11 +96,13 @@ static dma_addr_t virtio_msg_dma_map_page(struct device *dev, struct page *page,
 	if (dma_handle == DMA_MAPPING_ERROR)
 		return DMA_MAPPING_ERROR;
 
+	dma_offset = offset_in_page(dma_handle);
+	dma_handle -= dma_offset;
 	if (vmsg_ffa_bus_area_share(dev, phys_to_virt(dma_handle), n_pages,
 				    &dma_handle))
 		return DMA_MAPPING_ERROR;
 
-	return dma_handle + offset;
+	return dma_handle + dma_offset;
 }
 
 static void virtio_msg_dma_unmap_page(struct device *dev, dma_addr_t dma_handle,
@@ -119,6 +122,7 @@ static void virtio_msg_dma_unmap_page(struct device *dev, dma_addr_t dma_handle,
 	if (ret)
 		dev_err(dev, "%s: Failed to unshare area: %d", __func__, ret);
 
+	dma_handle += dma_offset;
 	swiotlb_tbl_unmap_single(dev, dma_to_phys(dev, dma_handle), size, dir,
 			attrs);
 }
