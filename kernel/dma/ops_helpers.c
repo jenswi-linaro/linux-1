@@ -28,6 +28,7 @@ int dma_common_get_sgtable(struct device *dev, struct sg_table *sgt,
 		sg_set_page(sgt->sgl, page, PAGE_ALIGN(size), 0);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(dma_common_get_sgtable);
 
 /*
  * Create userspace mapping for the DMA-coherent memory.
@@ -58,6 +59,7 @@ int dma_common_mmap(struct device *dev, struct vm_area_struct *vma,
 	return -ENXIO;
 #endif /* CONFIG_MMU */
 }
+EXPORT_SYMBOL_GPL(dma_common_mmap);
 
 struct page *dma_common_alloc_pages(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, enum dma_data_direction dir, gfp_t gfp)
@@ -85,6 +87,7 @@ struct page *dma_common_alloc_pages(struct device *dev, size_t size,
 	memset(page_address(page), 0, size);
 	return page;
 }
+EXPORT_SYMBOL_GPL(dma_common_alloc_pages);
 
 void dma_common_free_pages(struct device *dev, size_t size, struct page *page,
 		dma_addr_t dma_handle, enum dma_data_direction dir)
@@ -99,3 +102,4 @@ void dma_common_free_pages(struct device *dev, size_t size, struct page *page,
 				DMA_ATTR_SKIP_CPU_SYNC);
 	dma_free_contiguous(dev, page, size);
 }
+EXPORT_SYMBOL_GPL(dma_common_free_pages);
