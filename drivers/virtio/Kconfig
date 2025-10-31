@@ -211,6 +211,14 @@ config VIRTIO_MSG_FFA_DMA_OPS
 	help
 	  Enables DMA FFA OPS support for Virtio message.
 
+config DMABUF_HEAPS_FFA
+	bool "DMA-BUF FFA Heap"
+	depends on DMABUF_HEAPS
+	depends on VIRTIO_MSG_FFA_DMA_OPS
+	help
+	  Choose this option to enable the FFA based dmabuf heap. The system
+	  heap is backed by pages from the buddy allocator. If in doubt, say Y.
+
 config VIRTIO_DMA_SHARED_BUFFER
 	tristate
 	depends on DMA_SHARED_BUFFER

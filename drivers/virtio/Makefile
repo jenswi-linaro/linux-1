@@ -10,6 +10,7 @@ obj-$(CONFIG_VIRTIO_MSG) += virtio_msg_transport.o
 obj-$(CONFIG_VIRTIO_MSG_LOOPBACK) += virtio_msg_loopback.o
 virtio_msg_ffa_bus-y := virtio_msg_ffa.o
 virtio_msg_ffa_bus-$(CONFIG_VIRTIO_MSG_FFA_DMA_OPS) += virtio_msg_ffa_dma_ops.o
+virtio_msg_ffa_bus-$(CONFIG_DMABUF_HEAPS_FFA) += virtio_msg_ffa_dma_heap.o
 obj-$(CONFIG_VIRTIO_MSG_FFA) += virtio_msg_ffa_bus.o
 obj-$(CONFIG_VIRTIO_PCI) += virtio_pci.o
 virtio_pci-y := virtio_pci_modern.o virtio_pci_common.o

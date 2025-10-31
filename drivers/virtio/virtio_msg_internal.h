@@ -94,6 +94,12 @@ static inline int virtio_msg_user_register(struct virtio_msg_user_device *vmudev
 static inline void virtio_msg_user_unregister(struct virtio_msg_user_device *vmudev) {}
 #endif /* CONFIG_VIRTIO_MSG_USER */
 
+#if IS_REACHABLE(CONFIG_DMABUF_HEAPS_FFA)
+void virtio_msg_ffa_heap_create(struct device *dev);
+#else
+static inline void virtio_msg_ffa_heap_create(struct device *dev) {}
+#endif
+
 #if IS_REACHABLE(CONFIG_VIRTIO_MSG_FFA_DMA_OPS)
 int vmsg_ffa_bus_area_share(struct device *dev, void *vaddr, size_t n_pages,
 			    dma_addr_t *dma_handle);

@@ -710,6 +710,7 @@ static int virtio_msg_ffa_probe(struct ffa_device *ffa_dev)
 		i++;
 	}
 
+	virtio_msg_ffa_heap_create(dev);
 	return 0;
 
 unregister:
